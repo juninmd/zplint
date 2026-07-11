@@ -22,6 +22,23 @@ cargo build --release
 
 Expected: 0 issues. If issues are found, fix source before commit.
 
+## AMXX Rule References
+
+Use these primary references when adding or validating Pawn/AMXX lint rules:
+
+| Reference | Use |
+|-----------|-----|
+| `https://www.amxmodx.org/api/amxmodx` | Core AMXX natives and callback contracts |
+| `https://www.amxmodx.org/api/messages` | Message API scope, `message_begin/message_end`, `write_*`, and `get_msg_arg*/set_msg_arg*` rules |
+| `https://www.amxmodx.org/api/newmenus/menu_create` | Dynamic menu creation contracts |
+| `https://www.amxmodx.org/api/newmenus/menu_destroy` | Required cleanup for dynamic menu resources |
+| `https://www.amxmodx.org/api/file/fopen` | File handle lifecycle; pair `fopen` with `fclose` |
+| `https://www.amxmodx.org/api/cellarray/ArrayGetString` | Array index validity; guard `ArraySize() > 0` before random access |
+| `https://amxmodx.org/doc/index.html?page=source%2Ffunctions%2Fcore%2Fset_task.htm` | Legacy `set_task` flags/repeat semantics |
+| `https://github.com/alliedmodders/amxmodx` | Source-level validation for docs ambiguity and edge behavior |
+
+Before adding a detector, confirm it against at least one primary AMXX reference and one real `.sma` fixture/pattern from `D:\Solutions\pessoal\zplague-addons` when possible.
+
 ## Project Structure
 
 | Path | Purpose |

@@ -34,10 +34,9 @@ pub fn auto_fix(filepath: &Path, config: &Config, _use_color: bool) -> i32 {
 
 fn apply_fix(line: &str, issue: &crate::rules::LintIssue) -> Option<String> {
     let re_line = regex::Regex::new(r"^(\s*)if\s*\(\s*(\w+)\s*\)\s*$").unwrap();
-    if issue.rule_id == "zp_gamemode_if" || issue.rule_id == "zp_class_if" {
-        if let Some(caps) = re_line.captures(line) {
-            return Some(format!("{}if ({} > 0)", caps.get(1).unwrap().as_str(), caps.get(2).unwrap().as_str()));
-        }
+    if (issue.rule_id == "zp_gamemode_if" || issue.rule_id == "zp_class_if")
+        && let Some(caps) = re_line.captures(line) {
+        return Some(format!("{}if ({} > 0)", caps.get(1).unwrap().as_str(), caps.get(2).unwrap().as_str()));
     }
     if issue.rule_id == "buffer_size" {
         let re = regex::Regex::new(r"\b(get_user_name|get_user_authid|get_user_ip|get_user_team)\s*\(([^,]+),\s*(\w+),\s*(\d+)").unwrap();

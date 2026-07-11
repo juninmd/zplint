@@ -88,10 +88,10 @@ pub fn enclosing_body(lines: &[&str], idx: usize) -> String {
     let mut depth = 0i32;
     let mut started = false;
     let mut body = Vec::new();
-    for j in start..lines.len() {
-        body.push(lines[j]);
-        depth += lines[j].matches('{').count() as i32 - lines[j].matches('}').count() as i32;
-        if lines[j].contains('{') { started = true; }
+    for line in lines.iter().skip(start) {
+        body.push(*line);
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if line.contains('{') { started = true; }
         if started && depth <= 0 { break; }
     }
     body.join("\n")
@@ -103,7 +103,7 @@ pub fn find_publics(raw: &str) -> Vec<&str> {
 }
 
 pub fn find_nonpublics(raw: &str, publics: &[&str]) -> Vec<String> {
-    let re = Regex::new(r"^\s*([A-Za-z_]\w*)\s*\([^;{]*\)\s*$").unwrap();
+    let re = Regex::new(r"(?m)^([A-Za-z_]\w*)\s*\([^;{]*\)\s*(?:\{)?\s*$").unwrap();
     let all: Vec<String> = re.captures_iter(raw)
         .map(|c| c.get(1).unwrap().as_str().to_string())
         .collect();

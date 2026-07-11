@@ -32,10 +32,11 @@ pub fn start_watch(root: &Path, cfg: &Config) {
             Ok(Ok(event)) => {
                 if let EventKind::Modify(_) = event.kind {
                     for path in event.paths {
-                        if path.extension().map_or(true, |e| e != "sma") { continue; }
+                        if path.extension().is_none_or(|e| e != "sma") { continue; }
                         let now = Instant::now();
-                        if let Some(last) = debounce.get(&path) {
-                            if now.duration_since(*last) < Duration::from_millis(500) { continue; }
+                        if let Some(last) = debounce.get(&path)
+                            && now.duration_since(*last) < Duration::from_millis(500) {
+                            continue;
                         }
                         debounce.insert(path.clone(), now);
                         let issues = lint_file(&path, &cfg.rules);

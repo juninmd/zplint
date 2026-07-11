@@ -59,7 +59,7 @@ fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
     let sma_files = if files.is_empty() {
         discover::discover_files(root, &cfg.paths, &cfg.exclude)
     } else {
-        files
+        discover::resolve_input_files(root, &files, &cfg.exclude)
     };
 
     if sma_files.is_empty() {
@@ -84,7 +84,7 @@ fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
     let sma_files = if files.is_empty() {
         discover::discover_files(root, &cfg.paths, &cfg.exclude)
     } else {
-        files
+        discover::resolve_input_files(root, &files, &cfg.exclude)
     };
 
     if sma_files.is_empty() {

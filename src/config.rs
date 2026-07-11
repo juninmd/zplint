@@ -39,12 +39,22 @@ pub struct RulesConfig {
     #[serde(default = "true_val")] pub attacker_not_validated: bool,
     #[serde(default = "true_val")] pub get_user_origin: bool,
     #[serde(default = "true_val")] pub task_interval_zero: bool,
+    #[serde(default = "true_val")] pub set_task_flags: bool,
     #[serde(default = "true_val")] pub abort_call: bool,
     #[serde(default = "true_val")] pub nested_message: bool,
+    #[serde(default = "true_val")] pub message_write_outside: bool,
+    #[serde(default = "true_val")] pub message_end_without_begin: bool,
+    #[serde(default = "true_val")] pub message_hook_scope: bool,
+    #[serde(default = "true_val")] pub hardcoded_message_id: bool,
+    #[serde(default = "true_val")] pub array_random_empty: bool,
     #[serde(default = "true_val")] pub hardcoded_maxplayers: bool,
     #[serde(default = "true_val")] pub precache_outside_precache: bool,
     #[serde(default = "true_val")] pub zp_force_no_guard: bool,
     #[serde(default = "true_val")] pub library_exists_hotpath: bool,
+    #[serde(default = "true_val")] pub registered_callback_public: bool,
+    #[serde(default = "true_val")] pub percent_n_player_name: bool,
+    #[serde(default = "true_val")] pub menu_handler_destroy: bool,
+    #[serde(default = "true_val")] pub fopen_close: bool,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -77,10 +87,18 @@ impl Default for RulesConfig {
             create_entity_guard: true, buffer_size: true,
             client_cmd_spk: true, zp_items_register_check: true,
             attacker_not_validated: true, get_user_origin: true,
-            task_interval_zero: true, abort_call: true,
-            nested_message: true, hardcoded_maxplayers: true,
+            task_interval_zero: true, set_task_flags: true, abort_call: true,
+            nested_message: true, message_write_outside: true,
+            message_end_without_begin: true, message_hook_scope: true,
+            hardcoded_message_id: true,
+            array_random_empty: true,
+            hardcoded_maxplayers: true,
             precache_outside_precache: true, zp_force_no_guard: true,
             library_exists_hotpath: true,
+            registered_callback_public: true,
+            percent_n_player_name: true,
+            menu_handler_destroy: true,
+            fopen_close: true,
         }
     }
 }
