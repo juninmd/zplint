@@ -1,0 +1,23 @@
+[package]
+name = "zplint"
+version = "0.1.0"
+edition = "2024"
+description = "Lightning-fast linter for Zombie Plague 5.0 AMXX plugins"
+authors = ["zplague-addons"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+termcolor = "1"
+walkdir = "2"
+notify = { version = "8", features = ["macos_kqueue"] }
+anyhow = "1"
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
