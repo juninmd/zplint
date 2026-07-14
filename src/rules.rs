@@ -38,33 +38,50 @@ pub static DANGEROUS_FORWARDS: &[(&str, &str)] = &[
     ("Ham_Killed", "victim"),
 ];
 
+/// Remove spaces/tabs so guard checks match regardless of formatting style
+/// (`fclose( fp )` vs `fclose(fp)`). Newlines are kept.
+pub fn squash(s: &str) -> String {
+    s.chars().filter(|c| *c != ' ' && *c != '\t').collect()
+}
+
 /// Check if `var` is guarded in `scope` using fast string matching (no regex).
 pub fn has_guard(scope: &str, var: &str) -> bool {
+    let s = squash(scope);
     // Range checks: var < 1, var <= 0, var == 0, var == -1
-    if scope.contains(&format!("{} < 1", var))
-        || scope.contains(&format!("{} <= 0", var))
-        || scope.contains(&format!("{} == 0", var))
-        || scope.contains(&format!("{} == -1", var))
+    if s.contains(&format!("{}<1", var))
+        || s.contains(&format!("{}<=0", var))
+        || s.contains(&format!("{}==0", var))
+        || s.contains(&format!("{}==-1", var))
     {
         return true;
     }
     // is_user_connected/is_user_alive/pev_valid/is_user_valid
-    if scope.contains(&format!("is_user_connected({})", var))
-        || scope.contains(&format!("is_user_alive({})", var))
-        || scope.contains(&format!("pev_valid({})", var))
-        || scope.contains(&format!("is_user_valid({})", var))
+    if s.contains(&format!("is_user_connected({})", var))
+        || s.contains(&format!("is_user_alive({})", var))
+        || s.contains(&format!("pev_valid({})", var))
+        || s.contains(&format!("is_user_valid({})", var))
     {
         return true;
     }
     // pev(var, ...
-    if scope.contains(&format!("pev({},", var)) {
+    if s.contains(&format!("pev({},", var)) {
         return true;
     }
     // get_players(...)
-    if scope.contains("get_players(") {
+    if s.contains("get_players(") {
         return true;
     }
     false
+}
+
+/// True if `body` calls a player-mutating native on `var` (set_user_*/cs_set_*).
+pub fn uses_player_native_on(body: &str, var: &str) -> bool {
+    Regex::new(&format!(
+        r"\b(?:set_user_\w+|cs_(?:re)?set_\w+)\s*\(\s*{}\b",
+        regex::escape(var)
+    ))
+    .map(|re| re.is_match(body))
+    .unwrap_or(false)
 }
 
 pub fn enclosing_body(lines: &[&str], idx: usize) -> String {

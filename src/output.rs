@@ -36,6 +36,9 @@ pub fn print_results(results: &[(std::path::PathBuf, Vec<LintIssue>)], elapsed: 
             write!(stdout, "L{}: ", iss.lineno).ok();
             stdout.reset().ok();
             write!(stdout, "{}", iss.message).ok();
+            stdout.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(244)))).ok();
+            write!(stdout, "  {}", iss.rule_id).ok();
+            stdout.reset().ok();
             if iss.auto_fixable {
                 stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green))).ok();
                 write!(stdout, " [fix]").ok();

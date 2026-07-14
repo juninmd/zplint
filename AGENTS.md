@@ -43,22 +43,32 @@ Before adding a detector, confirm it against at least one primary AMXX reference
 
 | Path | Purpose |
 |------|---------|
-| `src/main.rs` | CLI entry point (clap) |
-| `src/config.rs` | TOML config (serde) |
-| `src/engine.rs` | Lint engine (17 detectors) |
-| `src/rules.rs` | Helper functions (has_guard, enclosing_body) |
-| `src/output.rs` | Biome-style colored output (termcolor) |
+| `src/main.rs` | CLI entry point (clap), rayon-parallel lint |
+| `src/config.rs` | TOML config (serde); `rules.disable` list for detectors.rs rules |
+| `src/engine.rs` | Lint engine (original 37 detectors), comment stripping, severity table |
+| `src/detectors.rs` | Research-driven detectors (53 rules, see docs/KNOWLEDGE.md) |
+| `src/rules.rs` | Helper functions (has_guard, enclosing_body, squash) |
+| `src/output.rs` | Biome-style colored output (termcolor), prints rule ids |
 | `src/fix.rs` | Auto-fix for safe patterns |
 | `src/watch.rs` | Watch mode (notify) |
 | `src/discover.rs` | .sma file discovery |
+| `docs/KNOWLEDGE.md` | Knowledge base: every rule's problem/consequence/sources from web research |
 
 ## Hard Rules
 
 1. Zero dependencies on Python/Node — single Rust binary
-2. All 17 detectors must pass on the zplague-addons repo before release
+2. The official `alliedmodders/amxmodx` bundled plugins must lint with **0 errors**
+   (warnings allowed) — canonical code is the false-positive baseline
 3. No unsafe code
-4. Test each rule with test .sma fixtures
+4. Test each rule with test .sma fixtures (bad flagged + good passes)
 5. Auto-fix only for 100% safe transforms (if > 0, charsmax)
+6. New detectors: document problem/consequence/sources in docs/KNOWLEDGE.md first;
+   add the rule id to WARNING_RULES in engine.rs if it is style/perf (not crash)
+7. Pawn parsing gotchas learned from the corpora: escape char is `^` unless
+   `#pragma ctrlchar '\'`; `//*` is a line comment (not a block open); braceless
+   single-statement function bodies exist; `if (..) message_begin(A) else
+   message_begin(B)` is one message, not nesting; multi-line strings continue with
+   a trailing `\`/`^`; literal-to-array assignment is legal when the literal fits
 
 ## Performance Goals
 

@@ -1,4 +1,5 @@
 mod config;
+mod detectors;
 mod discover;
 mod engine;
 mod fix;
@@ -68,7 +69,8 @@ fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
     }
 
     let start = Instant::now();
-    let results: Vec<_> = sma_files.iter()
+    use rayon::prelude::*;
+    let results: Vec<_> = sma_files.par_iter()
         .map(|f| {
             let issues = engine::lint_file(f, &cfg.rules);
             (f.clone(), issues)

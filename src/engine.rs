@@ -28,15 +28,14 @@ static RE_PERCENT_N_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
 static RE_REG_EVENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"register_event\s*\([^,]+,\s*"(\w+)""#).unwrap());
 static RE_REG_OTHER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\b(set_task|RegisterHam|register_forward)\s*\([^;]*?"(\w+)"#).unwrap());
 static RE_ITEMS_REG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(g_\w+)\s*=\s*zp_items_register\s*\(").unwrap());
-static RE_BLOCK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)/\*.*?\*/").unwrap());
 static RE_IDENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*$").unwrap());
 // New rules
 static RE_TAKE_DAMAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(Ham_TakeDamage|fw_TakeDamage|fw_Takedamage)\s*\(").unwrap());
 static RE_GET_USER_ORIGIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bget_user_origin\s*\(").unwrap());
 static RE_TASK_ZERO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bset_task\s*\(\s*(0(?:\.0*)?)\s*,"#).unwrap());
 static RE_ABORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\babort\s*\(").unwrap());
-static RE_MSG_BEGIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:e?message_begin|e?message_begin_f)\s*\(").unwrap());
-static RE_MSG_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\be?message_end\s*\(").unwrap());
+static RE_MSG_BEGIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:e?message_begin|e?message_begin_f)\s*\(|EngFunc_MessageBegin\b").unwrap());
+static RE_MSG_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\be?message_end\s*\(|EngFunc_MessageEnd\b").unwrap());
 static RE_MSG_WRITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\be?write_(?:byte|char|short|long|entity|angle|angle_f|coord|coord_f|string)\s*\(").unwrap());
 static RE_MSG_HOOK_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:get_msg_(?:args|argtype|arg_int|arg_float|arg_string|origin)|set_msg_arg_(?:int|float|string))\s*\(").unwrap());
 static RE_FUNCTION_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(?:public\s+)?([A-Za-z_]\w*)\s*\(").unwrap());
@@ -56,8 +55,13 @@ static FWD_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIssue> {
-    let raw = match std::fs::read_to_string(filepath) {
-        Ok(s) => s,
+    let raw = match std::fs::read(filepath) {
+        // Old .sma files are often Windows-1252; byte -> codepoint keeps ASCII
+        // and line structure intact, which is all the detectors need.
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+        },
         Err(_) => return vec![],
     };
 
@@ -105,7 +109,8 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
                 if !FWD_RE[idx].is_match(stripped) { continue; }
                 let body = enclosing_body(&lines_clean, i);
                 if has_guard(&body, param) { continue; }
-                if let Some(nat) = RISKY_NATIVES.iter().find(|n| body.contains(&format!("{}({}", n, param))) {
+                let body_sq = squash(&body);
+                if let Some(nat) = RISKY_NATIVES.iter().find(|n| body_sq.contains(&format!("{}({}", n, param))) {
                     issues.push(iss(lineno, format!("{} calls {} on '{}' without is_user_connected/valid guard", fwd, nat, param), "dangerous_forward_guard", false));
                 }
             }
@@ -138,7 +143,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
             && let Some(var) = RE_FIND_SPHERE.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
             let end = (i + 8).min(lines_clean.len());
             let after = lines_clean[i..end].join("\n");
-            if after.contains(&format!("set_user_({}", var)) && !has_guard(&after, &var) {
+            if uses_player_native_on(&after, &var) && !has_guard(&after, &var) {
                 issues.push(iss(lineno, format!("FindEntityInSphere result '{}' used as player without 1-32 guard", var), "find_entity_in_sphere", false));
             }
         }
@@ -154,8 +159,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
                 if started && depth <= 0 { break; }
             }
             let body = body.join("\n");
-            if (body.contains(&format!("set_user_({}", var)) || body.contains(&format!("cs_set_({}", var)))
-                && !has_guard(&body, &var) {
+            if uses_player_native_on(&body, &var) && !has_guard(&body, &var) {
                 issues.push(iss(lineno, format!("loop 1-32 uses player natives on '{}' without is_user_connected/alive guard", var), "loop_player_guard", false));
             }
         }
@@ -164,15 +168,15 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
             && let Some(caps) = RE_INFECT.captures(stripped) {
             let var = caps.get(2).unwrap().as_str().to_string();
             let body = enclosing_body(&lines_clean, i);
-            if !body.contains(&format!("zp_core_is_zombie({}", var)) {
+            if !squash(&body).contains(&format!("zp_core_is_zombie({}", var)) {
                 issues.push(iss(lineno, format!("zp_core_{}('{}') without checking if already infected/cured first (run time error 10)", caps.get(1).unwrap().as_str(), var), "zp_infect_cure_guard", false));
             }
         }
 
         if config.zp_gamemode_if && stripped.contains("zp_gamemodes_get_current")
             && let Some(var) = RE_GAMEMODE.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
-            let body = enclosing_body(&lines_clean, i);
-            if body.contains(&format!("if ({})", var)) && !body.contains(&format!("if ({} > 0)", var)) {
+            let body = squash(&enclosing_body(&lines_clean, i));
+            if body.contains(&format!("if({})", var)) && !body.contains(&format!("if({}>0)", var)) {
                 issues.push(iss(lineno, format!("if ({}) should be if ({} > 0) - gamemode can return -2 (ZP_NO_GAME_MODE)", var, var), "zp_gamemode_if", true));
             }
         }
@@ -180,8 +184,8 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         if config.zp_class_if {
             for re_fn in [&*RE_CLASS_Z, &*RE_CLASS_H] {
                 if let Some(var) = re_fn.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
-                    let body = enclosing_body(&lines_clean, i);
-                    if body.contains(&format!("if ({})", var)) && !body.contains(&format!("if ({} > 0)", var)) {
+                    let body = squash(&enclosing_body(&lines_clean, i));
+                    if body.contains(&format!("if({})", var)) && !body.contains(&format!("if({}>0)", var)) {
                         issues.push(iss(lineno, format!("if ({}) should be if ({} > 0) - class ID can return -1 (ZP_NO_CLASS)", var, var), "zp_class_if", true));
                     }
                 }
@@ -200,7 +204,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
 
         if config.create_entity_guard && stripped.contains("create_entity(")
             && let Some(var) = RE_CREATE_ENT.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
-            let body = enclosing_body(&lines_clean, i);
+            let body = squash(&enclosing_body(&lines_clean, i));
             if !body.contains(&format!("is_valid_ent({}", var)) && !body.contains(&format!("!{}", var)) {
                 issues.push(iss(lineno, format!("create_entity result '{}' used without is_valid_ent check", var), "create_entity_guard", false));
             }
@@ -226,10 +230,10 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         // 18. attacker_not_validated - fw_TakeDamage/Ham_TakeDamage handlers using attacker without guard
         if config.attacker_not_validated && RE_TAKE_DAMAGE.is_match(stripped) {
             let body = enclosing_body(&lines_clean, i);
-            let has_user_alive_check = body.contains("is_user_alive(attacker)")
-                || body.contains("is_user_connected(attacker)")
-                || body.contains("is_user_alive ( attacker )")
-                || body.contains("!attacker");
+            let body_sq = squash(&body);
+            let has_user_alive_check = body_sq.contains("is_user_alive(attacker)")
+                || body_sq.contains("is_user_connected(attacker)")
+                || body_sq.contains("!attacker");
             if !has_user_alive_check && (body.contains("attacker") || body.contains("g_attacker")) {
                 // Only flag if attacker is actually used in a risky context
                 if body.contains("set_user_") || body.contains("cs_set_") || body.contains("zp_") {
@@ -268,8 +272,9 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
             }
         }
 
-        // 21. abort_call - abort( usage
-        if config.abort_call && RE_ABORT.is_match(stripped) {
+        // 21. abort_call - abort( usage (abort(AMX_ERR_NATIVE, ...) inside a
+        // registered native is the documented way to raise a native error)
+        if config.abort_call && RE_ABORT.is_match(stripped) && !stripped.contains("AMX_ERR_") {
             issues.push(iss(lineno, "abort() causes run time error 1 - use log_error() for graceful degradation".into(), "abort_call", false));
         }
 
@@ -309,7 +314,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
 
         if config.fopen_close && let Some(caps) = RE_FOPEN_ASSIGN.captures(stripped) {
             let file_handle = caps.get(1).unwrap().as_str();
-            if !enclosing_body(&lines_clean, i).contains(&format!("fclose({})", file_handle)) {
+            if !squash(&enclosing_body(&lines_clean, i)).contains(&format!("fclose({})", file_handle)) {
                 issues.push(iss(lineno, format!("fopen handle \"{}\" is not closed with fclose({}) in this function", file_handle, file_handle), "fopen_close", false));
             }
         }
@@ -317,10 +322,13 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         // 22. nested_message - message_begin before message_end
         if config.nested_message {
             if RE_MSG_BEGIN.is_match(stripped) {
-                if msg_nesting > 0 {
+                // `if (..) message_begin(A) else message_begin(B)` is one message, not nesting
+                let prev = lines_clean[..i].iter().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim()).unwrap_or("");
+                let else_branch = prev == "else" || prev.starts_with("else ") || prev.starts_with("else{");
+                if msg_nesting > 0 && !else_branch {
                     issues.push(iss(lineno, "nested message_begin() without closing previous message_end() (will crash server)".into(), "nested_message", false));
                 }
-                msg_nesting += 1;
+                if !else_branch { msg_nesting += 1; }
                 _msg_begin_lineno = lineno;
             }
             if RE_MSG_END.is_match(stripped) {
@@ -364,7 +372,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
             let var = caps.get(2).unwrap().as_str().to_string();
             let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
             let body_enclosing = find_enclosing_fn(&lines_clean, &raw_clean, caps.get(0).unwrap().start());
-            if !body_enclosing.contains(&format!("zp_core_is_zombie({}", var)) {
+            if !squash(&body_enclosing).contains(&format!("zp_core_is_zombie({}", var)) {
                 issues.push(iss(lineno, format!("zp_core_force_{}('{}') without zp_core_is_zombie check first (bypasses validation)", caps.get(1).unwrap().as_str(), var), "zp_force_no_guard", false));
             }
         }
@@ -484,14 +492,17 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         }
     }
 
+    crate::detectors::run(&raw_clean, &lines_clean, config, &mut issues);
+
     if config.zp_items_register_check {
         for caps in RE_ITEMS_REG.captures_iter(&raw_clean) {
             let gvar = caps.get(1).unwrap().as_str().to_string();
             let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
-            if !raw_clean.contains(&format!("{} == -1", gvar))
-                && !raw_clean.contains(&format!("{} <= -1", gvar))
-                && !raw_clean.contains(&format!("{} < 0", gvar))
-                && !raw_clean.contains(&format!("{} != -1", gvar))
+            let raw_sq = squash(&raw_clean);
+            if !raw_sq.contains(&format!("{}==-1", gvar))
+                && !raw_sq.contains(&format!("{}<=-1", gvar))
+                && !raw_sq.contains(&format!("{}<0", gvar))
+                && !raw_sq.contains(&format!("{}!=-1", gvar))
             {
                 issues.push(iss(lineno, format!("'{}' = zp_items_register() return value not checked against -1", gvar), "zp_items_register_check", false));
             }
@@ -518,7 +529,7 @@ fn enclosing_body_from_pos(lines: &[&str], lineno: usize) -> String {
     }
 }
 
-fn enclosing_function_name(lines: &[&str], lineno: usize, function_names: &[String]) -> Option<String> {
+pub(crate) fn enclosing_function_name(lines: &[&str], lineno: usize, function_names: &[String]) -> Option<String> {
     let mut idx = lineno.min(lines.len().saturating_sub(1));
     loop {
         if let Some(caps) = RE_FUNCTION_DEF.captures(lines[idx]) {
@@ -535,17 +546,76 @@ fn enclosing_function_name(lines: &[&str], lineno: usize, function_names: &[Stri
     None
 }
 
-fn iss(lineno: usize, message: String, rule_id: &'static str, fixable: bool) -> LintIssue {
-    LintIssue { lineno, message, rule_id, severity: Severity::Error, auto_fixable: fixable }
+/// Rules that flag style/perf smells rather than crash risks (do not fail CI).
+static WARNING_RULES: &[&str] = &[
+    "touch_spam", "pev_oldbuttons", "get_user_origin", "library_exists_hotpath",
+    "hardcoded_maxplayers", "client_cmd_spk", "buffer_size",
+    // detectors.rs warnings
+    "mp3_loading_path", "te_reliable", "changelevel_cmd", "deprecated_symbols",
+    "define_reserved_const", "constant_condition", "self_assignment",
+    "comparison_as_statement", "assignment_in_condition", "unreachable_code",
+    "strlen_in_loop", "get_cvar_hotpath", "buffer_in_loop", "read_file_loop",
+    "precache_in_loop", "pragma_dynamic_stack", "div_by_runtime", "global_shadowing",
+    "callback_not_defined", "zp50_register_return", "zp50_get_in_init",
+    "zp_select_pre_filter", "zp_select_pre_return", "zp43_mixing", "entity_leak",
+    "client_command_handled", "client_connect_actions", "contain_truthy",
+    "strcmp_truthy", "format_injection", "string_assign", "hud_channel_range",
+    "line_too_long",
+];
+
+pub(crate) fn iss(lineno: usize, message: String, rule_id: &'static str, fixable: bool) -> LintIssue {
+    let severity = if WARNING_RULES.contains(&rule_id) { Severity::Warning } else { Severity::Error };
+    LintIssue { lineno, message, rule_id, severity, auto_fixable: fixable }
 }
 
+/// Remove /* */ comments, preserving line structure. Unlike a plain regex this
+/// ignores `/*` inside line comments (`//***`) and string literals.
 fn strip_block_comments(text: &str) -> String {
-    RE_BLOCK.replace_all(text, |caps: &regex::Captures| {
-        "\n".repeat(caps.get(0).unwrap().as_str().matches('\n').count())
-    }).to_string()
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_block = false;
+    let mut in_line = false;
+    let mut in_str = false;
+    while let Some(c) = chars.next() {
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            } else if c == '\n' {
+                out.push('\n');
+            }
+            continue;
+        }
+        if c == '\n' {
+            in_line = false;
+            in_str = false; // Pawn strings cannot span a raw newline
+            out.push('\n');
+            continue;
+        }
+        if in_line {
+            out.push(c);
+            continue;
+        }
+        if in_str {
+            out.push(c);
+            if c == '^' {
+                if let Some(n) = chars.next() { out.push(n); }
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => { in_str = true; out.push(c); }
+            '/' if chars.peek() == Some(&'/') => { in_line = true; out.push(c); }
+            '/' if chars.peek() == Some(&'*') => { chars.next(); in_block = true; }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
-fn extract_call_args(line: &str, function: &str) -> Vec<Vec<String>> {
+pub(crate) fn extract_call_args(line: &str, function: &str) -> Vec<Vec<String>> {
     let mut calls = Vec::new();
     let needle = format!("{}(", function);
     let mut offset = 0usize;
@@ -619,11 +689,12 @@ fn trim_string_literal(value: &str) -> String {
 }
 
 fn has_array_size_guard(body: &str, array_name: &str) -> bool {
+    let body_sq = squash(body);
     let size_call = format!("ArraySize({})", array_name);
-    body.contains(&format!("if ({})", size_call))
-        || body.contains(&format!("{} > 0", size_call))
-        || body.contains(&format!("0 < {}", size_call))
-        || body.contains(&format!("{} != 0", size_call))
+    body_sq.contains(&format!("if({})", size_call))
+        || body_sq.contains(&format!("{}>0", size_call))
+        || body_sq.contains(&format!("0<{}", size_call))
+        || body_sq.contains(&format!("{}!=0", size_call))
 }
 
 #[cfg(test)]

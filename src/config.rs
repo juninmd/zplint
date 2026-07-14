@@ -55,6 +55,14 @@ pub struct RulesConfig {
     #[serde(default = "true_val")] pub percent_n_player_name: bool,
     #[serde(default = "true_val")] pub menu_handler_destroy: bool,
     #[serde(default = "true_val")] pub fopen_close: bool,
+    /// Rule ids from detectors.rs to turn off (they are on by default).
+    #[serde(default)] pub disable: Vec<String>,
+}
+
+impl RulesConfig {
+    pub fn enabled(&self, rule_id: &str) -> bool {
+        !self.disable.iter().any(|d| d == rule_id)
+    }
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -99,6 +107,7 @@ impl Default for RulesConfig {
             percent_n_player_name: true,
             menu_handler_destroy: true,
             fopen_close: true,
+            disable: Vec::new(),
         }
     }
 }

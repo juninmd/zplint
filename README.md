@@ -1,9 +1,18 @@
 # zplint 🔍
 
-Lightning-fast linter for **Zombie Plague 5.0** AMXX plugins (CS 1.6).  
-Scans `.sma` files for **37 runtime-crash patterns** that cause HLDS `svc_bad` / segfault / run time error 10.
+Lightning-fast linter for **Pawn / AMX Mod X** plugins (CS 1.6), with deep **Zombie Plague 5.0** support.  
+Scans `.sma` files for **90 detectors**: compile errors before you compile, runtime-crash patterns
+(HLDS `svc_bad` / segfault / run time errors 3/4/10/11), engine limits (precache/edicts/netchan),
+tag-mismatch bugs, and ZP50 API contract violations.
 
-Written in **Rust**. Single binary, zero runtime dependencies. ~0.7s for 300 files.
+Every rule is backed by a documented source (AMXX compiler sources, AlliedModders wiki/forums,
+amxmodx.org API docs, official ZP 5.0 sources) — see [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md).
+
+Written in **Rust**, parallelized with rayon. Single binary, zero runtime dependencies.
+~1.7s for 542 files. Reads Windows-1252 legacy files, honors `#pragma ctrlchar`.
+
+Validated against two corpora: the official `alliedmodders/amxmodx` bundled plugins
+(**0 errors** — canonical code passes clean) and a 542-file real-world ZP plugin collection.
 
 ## Install
 
@@ -24,7 +33,7 @@ zplint watch             # Re-lint on file save
 zplint fix               # Apply auto-fixes
 ```
 
-## Rules (37 detectors)
+## Rules (90 detectors)
 
 ### Player Validation (8)
 | Rule | Severity | Fix | Description |
@@ -79,9 +88,95 @@ zplint fix               # Apply auto-fixes
 |------|----------|-----|-------------|
 | `abort_call` | error | ❌ | abort() causes run time error 1 |
 | `precache_sound_sprite` | error | ❌ | precache_sound on sprite-named variable (use precache_model) |
-| `buffer_size` | error | ✅ | Hardcoded buffer < 64 in get_user_* (use charsmax) |
-| `client_cmd_spk` | error | ❌ | client_cmd(0, "spk...") instead of emit_sound |
+| `buffer_size` | warning | ✅ | Hardcoded buffer < 64 in get_user_* (use charsmax) |
+| `client_cmd_spk` | warning | ❌ | client_cmd(0, "spk...") instead of emit_sound |
 | `hardcoded_maxplayers` | warning | ❌ | loop uses `#define MAXPLAYERS 32` as runtime player count |
+
+## Research-driven detectors (53)
+
+Added from internet research of real compile errors, crash reports and API docs
+(sources in [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md)). All are on by default; turn any off
+via `rules.disable` (see Config).
+
+### Compile structure (7)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `unbalanced_braces` | error | File ends with unmatched `{`/`}` (errors 030/054, cascades into 010/004) |
+| `unbalanced_preprocessor` | error | `#if`/`#else`/`#endif` stack errors (026/060/061) |
+| `unterminated_string` | error | Odd quote count on a line (error 037); escape-char and continuation aware |
+| `else_paren` | error | `else (cond)` instead of `else if (cond)` (error 029/010) |
+| `empty_statement` | error | `if (...)`/`while (...)` terminated by `;` detaches the block (error 036) |
+| `stacked_case` | error | `case A:` `case B:` — Pawn has no fallthrough; use `case A, B:` |
+| `line_too_long` | warning | Line > 511 chars (error 075 on amxxpc 1.8.x) |
+
+### Correctness (12)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `string_literal_compare` | error | `== "..."` — strings need equal()/equali() (error 033) |
+| `string_assign` | warning | String literal larger than the destination array (error 047) |
+| `forward_arity` | error | Known forward defined with wrong parameter count (error 025) |
+| `formatex_self` | error | formatex() output buffer also used as input (corrupts output) |
+| `assignment_in_condition` | warning | `if (x = 1)` (warning 211); `((x = y))` idiom is allowed |
+| `comparison_as_statement` | warning | `x == 5;` as a statement does nothing (warning 215) |
+| `self_assignment` | warning | `x = x;` (warning 226) |
+| `constant_condition` | warning | `if (0)` / `if (1)` dead-codes a branch (warnings 205/206) |
+| `unreachable_code` | warning | Statements after an unconditional return (warning 225) |
+| `contain_truthy` | warning | contain() returns -1 on miss — bare truthiness inverts the logic |
+| `strcmp_truthy` | warning | strcmp() returns 0 on match — bare `if (strcmp(..))` means "differs" |
+| `global_shadowing` | warning | Local `new` shadows a global (warning 219) |
+
+### Tag mismatch — warning 213 that misbehaves at runtime (3)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `set_task_int_interval` | error | `set_task(10, ..)` → interval becomes ~1e-44s (runs every frame) |
+| `pev_float_int` | error | Integer into Float pev field (pev_health 100 → ~1.4e-43 = instant death) |
+| `int_native_float` | error | Float into int native (set_user_health(id, 100.0) → 1120403456 hp) |
+
+### Runtime crashes (7)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `userid_as_index` | error | `arr[get_user_userid(id)]` — userid is a session counter, not an index (RTE 4) |
+| `player_array_32` | error | `new arr[32]` indexed by player id — overflows on full server (RTE 4) |
+| `find_ent_no_advance` | error | Entity-search loop restarting from a constant — infinite loop, server freeze |
+| `deathmsg_killer_guard` | error | DeathMsg `read_data(1)` can be 0 (world kills) — guard before use |
+| `div_by_runtime` | warning | Division by get_playersnum()/cvar that can be zero (RTE 11) |
+| `pragma_dynamic_stack` | warning | Local array ≥ 2048 cells without `#pragma dynamic` (RTE 3) |
+| `format_injection` | warning | User text (read_args/get_user_name) as format string — `%` in chat crashes |
+
+### Engine / HLDS limits (9)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `precache_mp3` | error | .mp3 through precache_sound/emit_sound — never plays; use precache_generic |
+| `sound_prefix` | error | `"sound/..."` prefix — paths are already relative to sound/ |
+| `model_not_precached` | error | Literal model set but never precached (fatal SV_ModelIndex) |
+| `mp3_loading_path` | warning | Client stufftext filter silently blocks paths containing "loading" |
+| `te_reliable` | warning | SVC_TEMPENTITY on MSG_ALL/MSG_ONE — reliable-channel overflow kicks |
+| `precache_in_loop` | warning | precache_* inside a loop risks the 512-entry engine limit |
+| `entity_leak` | warning | create_entity with no removal path — "ED_Alloc: no free edicts" |
+| `hud_channel_range` | warning | set_hudmessage channel outside 1-4/-1 |
+| `changelevel_cmd` | warning | server_cmd changelevel bypasses forwards and map validity check |
+
+### API contracts & modernization (8)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `callback_not_defined` | warning | Registered callback string has no function in the file ("function not found") |
+| `client_command_handled` | warning | PLUGIN_HANDLED in client_command starves other plugins (use _MAIN) |
+| `client_connect_actions` | warning | Client-affecting natives in client_connect (too early; use putinserver) |
+| `deprecated_symbols` | warning | client_disconnect / md5 / strbreak (AMXX 1.9 warning 233) |
+| `define_reserved_const` | warning | Redefining MAX_PLAYERS etc. from amxconst.inc (warning 201) |
+| `get_cvar_hotpath` | warning | get_cvar_* outside init — use cached pcvars ("dozens of times faster") |
+| `strlen_in_loop` | warning | strlen() in loop condition — O(n²) |
+| `buffer_in_loop` / `read_file_loop` | warning | Array re-zeroed per iteration / O(n²) file API in loops |
+
+### ZP 5.0 API (6)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `zp_fw_attacker_guard` | error | zp_fw_core_infect/cure `attacker` is 0 for gamemode/admin infections |
+| `zp_select_pre_filter` | warning | select_pre returns restrictive ZP_* without using itemid/classid — blocks ALL items |
+| `zp_select_pre_return` | warning | PLUGIN_HANDLED in select_pre (=NOT_AVAILABLE) / ZP_* in core _pre forwards |
+| `zp50_register_return` | warning | Registration id discarded — cannot filter forwards for your item/class |
+| `zp50_get_in_init` | warning | zp50 query natives in plugin_init ("Invalid Array Handle" load-order bug) |
+| `zp43_mixing` | warning | ZP 4.3 API (`<zombieplague>`) mixed with zp50 includes |
 
 ## Config
 
@@ -93,19 +188,24 @@ paths = ["meus_plugins_organizados"]
 exclude = ["00-Old_Archive"]
 
 [lint.rules]
-# true = enable, false = disable
+# original detectors: true = enable, false = disable
 client_disconnect_guard = true
 zp_gamemode_if = true
 abort_call = false
-# ...
+# research-driven detectors are on by default; turn off by id:
+disable = ["deprecated_symbols", "get_cvar_hotpath"]
 
 [output]
 color = true
 ```
 
+Severity model: **errors** are crash/compile-failure patterns and set exit code 1;
+**warnings** are style/perf/modernization signals and never fail CI.
+
 ## Performance
 
-~300 `.sma` files = **0.74s** (release build).
+542 real `.sma` files = **1.7s**; official amxmodx plugins (74 files) = **0.35s** (release build, rayon-parallel).
+Non-UTF8 (Windows-1252) legacy files are decoded, not skipped.
 
 ## License
 
