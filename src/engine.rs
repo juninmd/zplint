@@ -389,6 +389,40 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         }
     }
 
+    // Post-pass: 28. Infection-by-damage must validate last-human AND survivor.
+    // ZP invariant: a zombie infecting a human on damage must (a) never infect a
+    // survivor (immune) and (b) NOT infect the last human - the last human must be
+    // KILLED so CS ends the round (CT eliminated). Skipping either bugs the game:
+    // the round never ends when everyone turns zombie, or a survivor gets infected.
+    if config.zp_infect_lasthuman_survivor {
+        for caps in RE_TAKE_DAMAGE.captures_iter(&raw_clean) {
+            let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+            let body = enclosing_body_from_pos(&lines_clean, lineno - 1);
+            // Only handlers that actually infect on damage are subject to the rule.
+            if !body.contains("zp_core_infect") && !body.contains("zp_core_force_infect") {
+                continue;
+            }
+            let body_sq = squash(&body);
+            let has_lasthuman = body_sq.contains("get_human_count()==1")
+                || body_sq.contains("zp_core_is_last_human")
+                || body_sq.contains("is_last_human");
+            let has_survivor = body_sq.contains("survivor_get")
+                || body_sq.contains("zp_class_survivor");
+            if has_lasthuman && has_survivor {
+                continue;
+            }
+            let mut missing: Vec<&str> = Vec::new();
+            if !has_lasthuman { missing.push("last-human (zp_core_get_human_count()==1)"); }
+            if !has_survivor { missing.push("survivor (zp_class_survivor_get)"); }
+            issues.push(iss(
+                lineno,
+                format!("infection-by-damage handler must validate {} before infecting, or the round can stall / a survivor gets infected", missing.join(" and ")),
+                "zp_infect_lasthuman_survivor",
+                false,
+            ));
+        }
+    }
+
     // --- Existing post-pass rules ---
     if config.set_task_public {
         let publics = find_publics(&raw_clean);

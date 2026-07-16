@@ -913,6 +913,19 @@ mod tests {
     }
 
     #[test]
+    fn infect_lasthuman_survivor_rule() {
+        // Infection-by-damage handler with neither guard -> flagged
+        let bad = lint_str("infbad", "public fw_TakeDamage(victim, inflictor, attacker, Float:damage, dtype) {\n\tif (zp_core_is_zombie(attacker) && !zp_core_is_zombie(victim))\n\t\tzp_core_infect(victim, attacker);\n}\n");
+        assert!(bad.contains(&"zp_infect_lasthuman_survivor"));
+        // Both guards present -> not flagged
+        let ok = lint_str("infok", "public fw_TakeDamage(victim, inflictor, attacker, Float:damage, dtype) {\n\tif (zp_class_survivor_get(victim)) return HAM_IGNORED;\n\tif (zp_core_get_human_count() == 1) return HAM_IGNORED;\n\tzp_core_infect(victim, attacker);\n}\n");
+        assert!(!ok.contains(&"zp_infect_lasthuman_survivor"));
+        // Handler that does not infect -> not flagged
+        let noinf = lint_str("infnone", "public fw_TakeDamage(victim, inflictor, attacker, Float:damage, dtype) {\n\tif (!is_user_alive(attacker)) return HAM_IGNORED;\n\treturn HAM_IGNORED;\n}\n");
+        assert!(!noinf.contains(&"zp_infect_lasthuman_survivor"));
+    }
+
+    #[test]
     fn contain_and_strcmp_truthy() {
         let r = lint_str("cont", "public f() {\n\tnew msg[64];\n\tif (contain(msg, \"admin\")) return 1;\n\treturn 0;\n}\n");
         assert!(r.contains(&"contain_truthy"));
