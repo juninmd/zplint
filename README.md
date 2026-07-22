@@ -1,7 +1,7 @@
 # zplint 🔍
 
 Lightning-fast linter for **Pawn / AMX Mod X** plugins (CS 1.6), with deep **Zombie Plague 5.0** support.  
-Scans `.sma` files for **90 detectors**: compile errors before you compile, runtime-crash patterns
+Scans `.sma` files for **106 detectors**: compile errors before you compile, runtime-crash patterns
 (HLDS `svc_bad` / segfault / run time errors 3/4/10/11), engine limits (precache/edicts/netchan),
 tag-mismatch bugs, and ZP50 API contract violations.
 
@@ -33,7 +33,7 @@ zplint watch             # Re-lint on file save
 zplint fix               # Apply auto-fixes
 ```
 
-## Rules (90 detectors)
+## Rules (106 detectors)
 
 ### Player Validation (8)
 | Rule | Severity | Fix | Description |
@@ -92,13 +92,13 @@ zplint fix               # Apply auto-fixes
 | `client_cmd_spk` | warning | ❌ | client_cmd(0, "spk...") instead of emit_sound |
 | `hardcoded_maxplayers` | warning | ❌ | loop uses `#define MAXPLAYERS 32` as runtime player count |
 
-## Research-driven detectors (53)
+## Research-driven detectors (69)
 
 Added from internet research of real compile errors, crash reports and API docs
 (sources in [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md)). All are on by default; turn any off
 via `rules.disable` (see Config).
 
-### Compile structure (7)
+### Compile structure (9)
 | Rule | Severity | Description |
 |------|----------|-------------|
 | `unbalanced_braces` | error | File ends with unmatched `{`/`}` (errors 030/054, cascades into 010/004) |
@@ -108,8 +108,10 @@ via `rules.disable` (see Config).
 | `empty_statement` | error | `if (...)`/`while (...)` terminated by `;` detaches the block (error 036) |
 | `stacked_case` | error | `case A:` `case B:` — Pawn has no fallthrough; use `case A, B:` |
 | `line_too_long` | warning | Line > 511 chars (error 075 on amxxpc 1.8.x) |
+| `array_index_oob` | error | Literal out-of-bounds array write, e.g. `Players[32] = 15` on a 32-slot array (valid 0-31) |
+| `array_compare_by_ref` | error | `arr1 == arr2` compares array references, not contents — doesn't compile in Pawn |
 
-### Correctness (12)
+### Correctness (14)
 | Rule | Severity | Description |
 |------|----------|-------------|
 | `string_literal_compare` | error | `== "..."` — strings need equal()/equali() (error 033) |
@@ -123,14 +125,26 @@ via `rules.disable` (see Config).
 | `unreachable_code` | warning | Statements after an unconditional return (warning 225) |
 | `contain_truthy` | warning | contain() returns -1 on miss — bare truthiness inverts the logic |
 | `strcmp_truthy` | warning | strcmp() returns 0 on match — bare `if (strcmp(..))` means "differs" |
+| `sql_fieldname_truthy` | warning | `SQL_FieldNameToNum()` returns -1 on miss — bare truthiness misreads column 0 as failure |
+| `func_id_truthy` | warning | `get_func_id()`/`get_xvar_id()` return -1 on failure but id 0 is valid — bare truthiness (direct or via variable) misreads it as failure |
 | `global_shadowing` | warning | Local `new` shadows a global (warning 219) |
 
-### Tag mismatch — warning 213 that misbehaves at runtime (3)
+### Tag mismatch — warning 213 that misbehaves at runtime (13)
 | Rule | Severity | Description |
 |------|----------|-------------|
 | `set_task_int_interval` | error | `set_task(10, ..)` → interval becomes ~1e-44s (runs every frame) |
 | `pev_float_int` | error | Integer into Float pev field (pev_health 100 → ~1.4e-43 = instant death) |
 | `int_native_float` | error | Float into int native (set_user_health(id, 100.0) → 1120403456 hp) |
+| `engfunc_int_float` | error | Float literal into an engfunc() int/entity slot, checked positionally across ~20 EngFunc_* signatures (WalkMove mode, hull, WriteByte value, ...) |
+| `engfunc_float_int` | error | Int literal into an engfunc() Float slot, same table, reverse direction (e.g. `EngFunc_WriteCoord(36)` instead of `36.0`) |
+| `entity_ev_type_mismatch` | error | Engine module `entity_set_int(id, EV_FL_gravity, ..)` — EV_* prefix names the real family (int/float/vector/edict/string/byte), function used doesn't match |
+| `ham_int_float` | error | Float literal into an ExecuteHam(B)/Ham_* int slot (e.g. Ham_Use's use_type) |
+| `ham_float_int` | error | Int literal into an ExecuteHam(B)/Ham_* Float slot (e.g. `Ham_TakeDamage` damage passed as `25` instead of `25.0`) |
+| `set_ham_param_mismatch` | error | `SetHamParamInteger(4, ..)` inside a `Ham_TakeDamage` hook — slot 4 is `Float:damage`, wrong setter used regardless of the value passed |
+| `cs_float_int` | error | Int literal into a cstrike.inc Float setter (`cs_set_c4_explode_time`, `cs_set_user_lastactivity`, `cs_set_hostage_lastuse/nextuse`) |
+| `fun_float_int` | error | Int literal into `set_user_maxspeed`/`set_user_gravity`'s Float parameter |
+| `amxmodx_int_float` | error | Float literal into a `set_hudmessage`/`set_dhudmessage`/`emit_sound`/`change_task` int slot |
+| `amxmodx_float_int` | error | Int literal into a `set_hudmessage`/`set_dhudmessage`/`emit_sound`/`change_task` Float slot (fxtime, holdtime, vol, att, newTime, ...) |
 
 ### Runtime crashes (7)
 | Rule | Severity | Description |
@@ -143,7 +157,7 @@ via `rules.disable` (see Config).
 | `pragma_dynamic_stack` | warning | Local array ≥ 2048 cells without `#pragma dynamic` (RTE 3) |
 | `format_injection` | warning | User text (read_args/get_user_name) as format string — `%` in chat crashes |
 
-### Engine / HLDS limits (9)
+### Engine / HLDS limits (10)
 | Rule | Severity | Description |
 |------|----------|-------------|
 | `precache_mp3` | error | .mp3 through precache_sound/emit_sound — never plays; use precache_generic |
@@ -155,6 +169,7 @@ via `rules.disable` (see Config).
 | `entity_leak` | warning | create_entity with no removal path — "ED_Alloc: no free edicts" |
 | `hud_channel_range` | warning | set_hudmessage channel outside 1-4/-1 |
 | `changelevel_cmd` | warning | server_cmd changelevel bypasses forwards and map validity check |
+| `geoip_code_overflow` | error | `geoip_code2/3()` overflow their result buffer by one cell on an unknown IP — use the `_ex` variant |
 
 ### API contracts & modernization (8)
 | Rule | Severity | Description |

@@ -15,9 +15,243 @@ static RE_PEV_FLOAT_INT: LazyLock<Regex> = LazyLock::new(|| {
     // literal 0 is exempt: its bit pattern equals 0.0
     Regex::new(r"\bset_pev\s*\(\s*[^,]+,\s*pev_(health|gravity|maxspeed|speed|dmg|takedamage|animtime|framerate|scale|renderamt|frame|fuser[1-4])\s*,\s*-?0*[1-9]\d*\s*\)").unwrap()
 });
+static RE_CS_INT_FLOAT: LazyLock<Regex> = LazyLock::new(|| {
+    // cstrike.inc single-arg Float: setters; literal 0 is exempt (bit-identical to 0.0)
+    Regex::new(r"\bcs_set_(?:user_lastactivity|hostage_lastuse|hostage_nextuse|c4_explode_time)\s*\(\s*[^,]+,\s*-?0*[1-9]\d*\s*\)").unwrap()
+});
+static RE_FUN_INT_FLOAT: LazyLock<Regex> = LazyLock::new(|| {
+    // fun.inc: set_user_maxspeed(index, Float:speed)/set_user_gravity(index, Float:gravity).
+    // Heavily used in ZP class scripts; literal 0 is exempt (bit-identical to 0.0).
+    Regex::new(r"\bset_user_(?:maxspeed|gravity)\s*\(\s*[^,]+,\s*-?0*[1-9]\d*\s*\)").unwrap()
+});
 static RE_INT_NATIVE_FLOAT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(set_user_health|set_user_armor|set_user_frags|cs_set_user_money|zp_ammopacks_set)\s*\(\s*[^,]+,\s*-?\d+\.\d+").unwrap()
 });
+#[derive(Clone, Copy, PartialEq)]
+enum EfType {
+    /// Float scalar (HLSDK `float`) - a bare int literal here is bit-reinterpreted as ~1e-44/1e-43.
+    F,
+    /// Int/entity/bool/byte/ushort scalar - a float literal here is bit-reinterpreted as a huge int.
+    I,
+}
+
+/// Positional parameter types for EngFunc_* selectors, taken verbatim from the HLSDK
+/// signatures documented in amxmodx's fakemeta_const.inc. Index 0 = first real parameter
+/// (i.e. engfunc() call arg index 1, right after the EngFunc_X selector). `None` = vector/
+/// string/handle argument - never a bare literal in practice, so left unchecked.
+static ENGFUNC_PARAM_TYPES: &[(&str, &[Option<EfType>])] = &[
+    ("EngFunc_WalkMove", &[Some(EfType::I), Some(EfType::F), Some(EfType::F), Some(EfType::I)]),
+    ("EngFunc_MoveToOrigin", &[Some(EfType::I), None, Some(EfType::F), Some(EfType::I)]),
+    ("EngFunc_TraceLine", &[None, None, Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_TraceHull", &[None, None, Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_TraceModel", &[None, None, Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_TraceSphere", &[None, None, Some(EfType::I), Some(EfType::F), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_TraceMonsterHull", &[Some(EfType::I), None, None, Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_GetAimVector", &[Some(EfType::I), Some(EfType::F), None]),
+    ("EngFunc_EmitSound", &[Some(EfType::I), Some(EfType::I), None, Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_EmitAmbientSound", &[Some(EfType::I), None, None, Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_ParticleEffect", &[None, None, Some(EfType::F), Some(EfType::F)]),
+    ("EngFunc_SetClientMaxspeed", &[Some(EfType::I), Some(EfType::F)]),
+    ("EngFunc_AnimationAutomove", &[Some(EfType::I), Some(EfType::F)]),
+    ("EngFunc_CrosshairAngle", &[Some(EfType::I), Some(EfType::F), Some(EfType::F)]),
+    ("EngFunc_FadeClientVolume", &[Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_RunPlayerMove", &[Some(EfType::I), None, Some(EfType::F), Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_StaticDecal", &[None, Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_BuildSoundMsg", &[Some(EfType::I), Some(EfType::I), None, Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::I), None, Some(EfType::I)]),
+    ("EngFunc_PlaybackEvent", &[Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::F), None, None, Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::I)]),
+    ("EngFunc_MessageBegin", &[Some(EfType::I), Some(EfType::I), None, Some(EfType::I)]),
+    ("EngFunc_WriteCoord", &[Some(EfType::F)]),
+    ("EngFunc_WriteAngle", &[Some(EfType::F)]),
+    ("EngFunc_WriteByte", &[Some(EfType::I)]),
+    ("EngFunc_WriteChar", &[Some(EfType::I)]),
+    ("EngFunc_WriteShort", &[Some(EfType::I)]),
+    ("EngFunc_WriteLong", &[Some(EfType::I)]),
+    ("EngFunc_WriteEntity", &[Some(EfType::I)]),
+];
+static RE_INT_LITERAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?\d+$").unwrap());
+static RE_FLOAT_LITERAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?\d+\.\d+$").unwrap());
+
+/// Check every engfunc() call on `line` against ENGFUNC_PARAM_TYPES; returns
+/// (rule_id, message) for each positional literal/type mismatch found.
+fn engfunc_param_mismatches(line: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for args in extract_call_args(line, "engfunc") {
+        if args.is_empty() {
+            continue;
+        }
+        let selector = args[0].trim();
+        let Some((_, types)) = ENGFUNC_PARAM_TYPES.iter().find(|(name, _)| *name == selector) else {
+            continue;
+        };
+        for (i, expected) in types.iter().enumerate() {
+            let Some(kind) = expected else { continue };
+            let Some(arg) = args.get(i + 1) else { continue };
+            let arg = arg.trim();
+            match kind {
+                EfType::I if RE_FLOAT_LITERAL.is_match(arg) => {
+                    out.push(("engfunc_int_float", format!(
+                        "float literal {} into {}'s int/entity parameter #{} (warning 213); reinterpreted bit-for-bit as a huge integer - drop the decimals",
+                        arg, selector, i + 1
+                    )));
+                }
+                // int 0 is bit-identical to float 0.0 - only non-zero int literals are unsafe here
+                EfType::F if RE_INT_LITERAL.is_match(arg) && arg.trim_start_matches('-') != "0" => {
+                    out.push(("engfunc_float_int", format!(
+                        "integer literal {} into {}'s Float parameter #{} (warning 213); reinterpreted bit-for-bit as ~1e-44 - add .0",
+                        arg, selector, i + 1
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Positional parameter types for the handful of Ham_* forwards that mix Float and Int/entity
+/// scalars AND are actually used in CS/ZP scripting (ham_const.inc documents ~470 forwards
+/// total, but most are mod-specific to TFC/NS/SC/ESF/DOD/TS and irrelevant here). Verified
+/// against each constant's own "Forward params:" doc comment. Index 0 = `this` (args[1] of the
+/// ExecuteHam(B) call); `None` = vector/string argument, left unchecked (see ENGFUNC_PARAM_TYPES).
+static HAM_PARAM_TYPES: &[(&str, &[Option<EfType>])] = &[
+    ("Ham_TakeDamage", &[Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::F), Some(EfType::I)]),
+    ("Ham_TakeHealth", &[Some(EfType::I), Some(EfType::F), Some(EfType::I)]),
+    ("Ham_TraceAttack", &[Some(EfType::I), Some(EfType::I), Some(EfType::F), None, Some(EfType::I), Some(EfType::I)]),
+    ("Ham_Use", &[Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::F)]),
+    ("Ham_CS_Player_Blind", &[Some(EfType::I), Some(EfType::F), Some(EfType::F), Some(EfType::F), Some(EfType::I)]),
+    ("Ham_CS_Player_GetAutoaimVector", &[Some(EfType::I), Some(EfType::F), None]),
+];
+
+/// SetHamParam{Integer,Float}(which, ..) numbers "which" differently from ExecuteHam's own
+/// argument list: a Float:vec[3] forward parameter is addressed as 3 CONSECUTIVE Float
+/// `which` slots (one per x/y/z component), not 1 slot. Confirmed against real-world usage:
+/// `SetHamParamFloat(4/5/6, direction[0/1/2] * resist)` inside a Ham_TraceAttack hook (direction
+/// is TraceAttack's 4th forward param) - an earlier version of this table treated the vector as
+/// a single unchecked slot and misread components 5/6 as hitting the (nonexistent) int slots
+/// that follow, a false positive caught by corpus validation. Only forwards actually reachable
+/// via SetHamParam need an entry here (RegisterHam pre-hooks only).
+static HAM_WHICH_PARAM_TYPES: &[(&str, &[EfType])] = &[
+    ("Ham_TakeDamage", &[EfType::I, EfType::I, EfType::I, EfType::F, EfType::I]),
+    ("Ham_TakeHealth", &[EfType::I, EfType::F, EfType::I]),
+    ("Ham_TraceAttack", &[EfType::I, EfType::I, EfType::F, EfType::F, EfType::F, EfType::F, EfType::I, EfType::I]),
+    ("Ham_Use", &[EfType::I, EfType::I, EfType::I, EfType::I, EfType::F]),
+    ("Ham_CS_Player_Blind", &[EfType::I, EfType::F, EfType::F, EfType::F, EfType::I]),
+    ("Ham_CS_Player_GetAutoaimVector", &[EfType::I, EfType::F]),
+];
+
+fn ham_param_mismatches(line: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for func in ["ExecuteHam", "ExecuteHamB"] {
+        for args in extract_call_args(line, func) {
+            if args.is_empty() {
+                continue;
+            }
+            let selector = args[0].trim();
+            let Some((_, types)) = HAM_PARAM_TYPES.iter().find(|(name, _)| *name == selector) else {
+                continue;
+            };
+            for (i, expected) in types.iter().enumerate() {
+                let Some(kind) = expected else { continue };
+                let Some(arg) = args.get(i + 1) else { continue };
+                let arg = arg.trim();
+                match kind {
+                    EfType::I if RE_FLOAT_LITERAL.is_match(arg) => {
+                        out.push(("ham_int_float", format!(
+                            "float literal {} into {}'s int/entity parameter #{} ({}(...)) - reinterpreted bit-for-bit as a huge integer - drop the decimals",
+                            arg, selector, i + 1, func
+                        )));
+                    }
+                    // int 0 is bit-identical to float 0.0 - only non-zero int literals are unsafe here
+                    EfType::F if RE_INT_LITERAL.is_match(arg) && arg.trim_start_matches('-') != "0" => {
+                        out.push(("ham_float_int", format!(
+                            "integer literal {} into {}'s Float parameter #{} ({}(...)) - reinterpreted bit-for-bit as ~1e-44/1e-43 - add .0",
+                            arg, selector, i + 1, func
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Positional parameter types for a handful of amxmodx.inc core natives whose signature mixes
+/// Float: and plain-int params (unlike engfunc/ExecuteHam these are NORMALLY tagged natives, so
+/// amxxpc already emits warning 213 for a mismatch here - same "catch it before compiling"
+/// posture as set_task_int_interval/pev_float_int, just extended to more natives). Index 0 is
+/// the FIRST real argument (no selector to skip, unlike ENGFUNC/HAM_PARAM_TYPES).
+static AMXMODX_PARAM_TYPES: &[(&str, &[Option<EfType>])] = &[
+    ("set_hudmessage", &[Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::F), Some(EfType::F), Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::I)]),
+    ("set_dhudmessage", &[Some(EfType::I), Some(EfType::I), Some(EfType::I), Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::F), Some(EfType::F), Some(EfType::F), Some(EfType::F)]),
+    ("emit_sound", &[Some(EfType::I), Some(EfType::I), None, Some(EfType::F), Some(EfType::F), Some(EfType::I), Some(EfType::I)]),
+    ("change_task", &[Some(EfType::I), Some(EfType::F), Some(EfType::I)]),
+];
+
+fn amxmodx_param_mismatches(line: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for (name, types) in AMXMODX_PARAM_TYPES {
+        for args in extract_call_args(line, name) {
+            for (i, expected) in types.iter().enumerate() {
+                let Some(kind) = expected else { continue };
+                let Some(arg) = args.get(i) else { continue };
+                let arg = arg.trim();
+                match kind {
+                    EfType::I if RE_FLOAT_LITERAL.is_match(arg) => {
+                        out.push(("amxmodx_int_float", format!(
+                            "float literal {} into {}()'s int parameter #{} (warning 213) - reinterpreted bit-for-bit as a huge integer - drop the decimals",
+                            arg, name, i + 1
+                        )));
+                    }
+                    EfType::F if RE_INT_LITERAL.is_match(arg) && arg.trim_start_matches('-') != "0" => {
+                        out.push(("amxmodx_float_int", format!(
+                            "integer literal {} into {}()'s Float parameter #{} (warning 213) - reinterpreted bit-for-bit as ~1e-44/1e-43 - add .0",
+                            arg, name, i + 1
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Engine module (engine.inc) entity_get_*/entity_set_* natives are keyed by an EV_* constant
+/// whose prefix names the field's real data family (engine_const.inc). The native family
+/// picked by the caller (int/float/vector/edict/string/byte) is never cross-checked by the
+/// compiler against that prefix - passing an EV_FL_ (Float) field to entity_set_int(), for
+/// example, silently reads/writes the wrong bit pattern.
+static ENGINE_EV_PREFIX_FAMILY: &[(&str, &str)] = &[
+    ("EV_INT_", "int"),
+    ("EV_FL_", "float"),
+    ("EV_VEC_", "vector"),
+    ("EV_ENT_", "edict"),
+    ("EV_SZ_", "string"),
+    ("EV_BYTE_", "byte"),
+];
+static RE_ENTITY_GETSET: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bentity_(?:get|set)_(int|float|vector|edict2?|string|byte)\s*\(\s*[^,]+,\s*(EV_[A-Za-z0-9_]+)").unwrap()
+});
+
+fn entity_ev_mismatch(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for caps in RE_ENTITY_GETSET.captures_iter(line) {
+        let func_family = match caps.get(1).unwrap().as_str() {
+            "edict2" => "edict",
+            other => other,
+        };
+        let constant = caps.get(2).unwrap().as_str();
+        if let Some((prefix, expected)) = ENGINE_EV_PREFIX_FAMILY.iter().find(|(p, _)| constant.starts_with(p))
+            && *expected != func_family {
+            out.push(format!(
+                "{} ({}* field) passed to entity_*_{}() - use entity_*_{}() instead, or the wrong bit pattern is read/written",
+                constant, prefix, func_family, expected
+            ));
+        }
+    }
+    out
+}
 static RE_USERID_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\w+\[\s*get_user_userid\s*\(").unwrap());
 static RE_FIND_ENT_CONST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"while\s*\(\s*\(?\s*\w+\s*=\s*(?:find_ent_by_(?:class|owner|target)\s*\(\s*(?:-1|0)\s*,|engfunc\s*\(\s*EngFunc_FindEntityByString\s*,\s*(?:-1|0)\s*,)").unwrap()
@@ -36,6 +270,10 @@ static RE_TE_RELIABLE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_CHANGELEVEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"server_cmd\s*\(\s*"changelevel"#).unwrap());
 static RE_DEPRECATED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(md5|md5_file|strbreak)\s*\(").unwrap());
+static RE_GEOIP_CODE_OVERFLOW: LazyLock<Regex> = LazyLock::new(|| {
+    // geoip_code2/3 (not the _ex variants) document a one-cell buffer overflow on unknown IPs.
+    Regex::new(r"\b(geoip_code[23])\s*\(").unwrap()
+});
 static RE_DEPRECATED_DISCONNECT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bpublic\s+client_disconnect\s*\(").unwrap()
 });
@@ -53,6 +291,8 @@ static RE_STRING_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
 static RE_ARRAY_SIZE_DECL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bnew\s+(?:const\s+)?(?:\w+:)?(\w+)\s*\[\s*(\d+)\s*\]").unwrap()
 });
+static RE_ARR_WRITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Za-z_]\w*)\[\s*(-?\d+)\s*\]\s*=").unwrap());
+static RE_ARR_CMP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Za-z_]\w*)\s*(==|!=)\s*([A-Za-z_]\w*)\b").unwrap());
 static RE_CMP_STMT: LazyLock<Regex> = LazyLock::new(|| {
     // require the trailing `;` - without it the line is usually a multi-line condition
     Regex::new(r"^\s*[A-Za-z_][\w\[\]]*\s*==\s*[^;=|&<>]+;\s*$").unwrap()
@@ -77,6 +317,17 @@ static RE_CONTAIN_COND: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:if|while)\s*\(\s*!?\s*(contain|containi)\s*\(").unwrap()
 });
 static RE_STRCMP_COND: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:if|while)\s*\(\s*strcmp\s*\(").unwrap());
+static RE_SQL_FIELDNUM_COND: LazyLock<Regex> = LazyLock::new(|| {
+    // sqlx.inc: SQL_FieldNameToNum returns -1 on failure, but column 0 is a valid, falsy result.
+    Regex::new(r"\b(?:if|while)\s*\(\s*!?\s*SQL_FieldNameToNum\s*\(").unwrap()
+});
+static RE_FUNCID_COND: LazyLock<Regex> = LazyLock::new(|| {
+    // amxmodx.inc: get_func_id/get_xvar_id return -1 on failure, but id 0 is a valid, falsy result.
+    Regex::new(r"\b(?:if|while)\s*\(\s*!?\s*(?:get_func_id|get_xvar_id)\s*\(").unwrap()
+});
+static RE_FUNCID_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Za-z_]\w*)\s*=\s*(?:get_func_id|get_xvar_id)\s*\(").unwrap()
+});
 static RE_CMP_OP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[=!<>]=|[<>]").unwrap());
 static RE_ZP_REG_STMT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\s*zp_(items|class_zombie|class_human|gamemodes)_register\s*\(").unwrap()
@@ -124,6 +375,21 @@ static RE_CALLBACK_STR: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_PUBLIC_HANDLED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"return\s+PLUGIN_HANDLED\b").unwrap());
 static RE_IDENT_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*$").unwrap());
+static RE_HAM_DMG_CB: LazyLock<Regex> = LazyLock::new(|| {
+    // Ham_TakeDamage only: the bullet/pellet path is the confirmed crash. Ham_Touch is
+    // excluded on purpose - self-removing pickups in Touch are the ubiquitous safe idiom.
+    Regex::new(r#"RegisterHam\s*\(\s*Ham_(TakeDamage)\s*,\s*"[^"]*"\s*,\s*"(\w+)""#).unwrap()
+});
+static RE_SYNC_REMOVE_ENT: LazyLock<Regex> = LazyLock::new(|| {
+    // Immediate edict free. FL_KILLME is the SAFE deferred pattern - intentionally excluded.
+    Regex::new(r"\bremove_entity\s*\(|\bEngFunc_RemoveEntity\b|\bREMOVE_ENTITY\s*\(").unwrap()
+});
+static RE_REGISTERHAM_ANY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"RegisterHam\s*\(\s*(Ham_\w+)\s*,\s*"[^"]*"\s*,\s*"(\w+)""#).unwrap()
+});
+static RE_SET_HAM_PARAM: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bSetHamParam(Integer|Float)\s*\(\s*(\d+)\s*,").unwrap()
+});
 
 /// Strip string/char literal contents and `//` comments. `esc` is the file's
 /// escape character: AMXX defaults to `^`, overridable via `#pragma ctrlchar`.
@@ -374,6 +640,46 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             }
         }
 
+        // Restricted to WRITES (`name[N] =`) on non-declaration lines: a multi-var `new a[4],
+        // b[32]` statement has no leading `new` before `b[32]`, so a bare access-style regex
+        // misreads every later array's own size declaration as an out-of-bounds access on
+        // itself (e.g. `new name[32], authid[32]` -> "authid[32]" looks like an access to
+        // array_sizes["authid"]=32). Requiring a trailing `=` and excluding declaration/
+        // signature lines confines this to the real bug: an assignment through a literal
+        // out-of-bounds index.
+        if config.enabled("array_index_oob")
+            && !["new ", "static ", "const ", "stock ", "#"].iter().any(|kw| san_trim.starts_with(kw)) {
+            for caps in RE_ARR_WRITE.captures_iter(san) {
+                let m = caps.get(0).unwrap();
+                if san.as_bytes().get(m.end()).copied() == Some(b'=') { continue; } // `==`, not assignment
+                let name = caps.get(1).unwrap().as_str();
+                let Some(&size) = array_sizes.get(name) else { continue };
+                let Ok(idx) = caps.get(2).unwrap().as_str().parse::<i64>() else { continue };
+                if idx < 0 || idx as u64 >= size as u64 {
+                    issues.push(iss(lineno, format!(
+                        "literal index {} is out of bounds for {}[{}] (valid range 0-{}) - amxxpc rejects constant out-of-bounds indices at compile time",
+                        idx, name, size, size.saturating_sub(1)
+                    ), "array_index_oob", false));
+                }
+            }
+        }
+
+        if config.enabled("array_compare_by_ref") && !san_trim.starts_with('#') {
+            for caps in RE_ARR_CMP.captures_iter(san) {
+                let a = caps.get(1).unwrap();
+                let op = caps.get(2).unwrap().as_str();
+                let b = caps.get(3).unwrap();
+                if san[b.end()..].starts_with('[') { continue; }
+                let (aname, bname) = (a.as_str(), b.as_str());
+                if aname != bname && array_sizes.contains_key(aname) && array_sizes.contains_key(bname) {
+                    issues.push(iss(lineno, format!(
+                        "'{} {} {}' compares two arrays by reference, not by content; Pawn has no array ==/!= - compare element-by-element or use equal()/equali() for strings",
+                        aname, op, bname
+                    ), "array_compare_by_ref", false));
+                }
+            }
+        }
+
         if config.enabled("constant_condition") && RE_CONST_COND.is_match(san) {
             issues.push(iss(lineno, "constant condition dead-codes this branch (warnings 205/206) - debugging leftover?".into(), "constant_condition", false));
         }
@@ -391,6 +697,33 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             let close = rest.find(')').map(|p| &rest[p..]).unwrap_or("");
             if !RE_CMP_OP.is_match(close) && !san.contains("!strcmp") {
                 issues.push(iss(lineno, "strcmp() returns 0 on match; bare 'if (strcmp(..))' means strings DIFFER - use equal() or '== 0'".into(), "strcmp_truthy", false));
+            }
+        }
+
+        if config.enabled("sql_fieldname_truthy") && let Some(m) = RE_SQL_FIELDNUM_COND.find(san) {
+            let rest = &san[m.end()..];
+            let close = rest.find(')').map(|p| &rest[p..]).unwrap_or("");
+            if !RE_CMP_OP.is_match(close) {
+                issues.push(iss(lineno, "SQL_FieldNameToNum() returns -1 when the column doesn't exist, but column 0 is a valid (falsy) result; bare 'if (SQL_FieldNameToNum(..))' misreads column 0 as failure - compare with != -1".into(), "sql_fieldname_truthy", false));
+            }
+        }
+
+        if config.enabled("func_id_truthy") && let Some(m) = RE_FUNCID_COND.find(san) {
+            let rest = &san[m.end()..];
+            let close = rest.find(')').map(|p| &rest[p..]).unwrap_or("");
+            if !RE_CMP_OP.is_match(close) {
+                issues.push(iss(lineno, "get_func_id()/get_xvar_id() return -1 on failure, but id 0 is a valid (falsy) result; bare 'if (get_func_id(..))' misreads id 0 as failure - compare with != -1".into(), "func_id_truthy", false));
+            }
+        }
+
+        // the more common real-world idiom assigns the id to a variable first, then tests it
+        // bare a line or two later (e.g. `new x = get_xvar_id(name); if (x) ...`)
+        if config.enabled("func_id_truthy") && let Some(caps) = RE_FUNCID_ASSIGN.captures(san) {
+            let var = caps.get(1).unwrap().as_str();
+            let body_sq = squash(&enclosing_body(lines, i));
+            if body_sq.contains(&format!("if({})", var)) || body_sq.contains(&format!("if(!{})", var))
+                || body_sq.contains(&format!("while({})", var)) || body_sq.contains(&format!("while(!{})", var)) {
+                issues.push(iss(lineno, format!("'{}' holds a get_func_id()/get_xvar_id() result (-1 on failure, but id 0 is valid); a bare 'if ({})' in this function misreads id 0 as failure - compare with != -1", var, var), "func_id_truthy", false));
             }
         }
 
@@ -418,6 +751,38 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
 
         if config.enabled("int_native_float") && RE_INT_NATIVE_FLOAT.is_match(san) {
             issues.push(iss(lineno, "float literal into an integer native (warning 213); 100.0 becomes 1120403456 - drop the decimals or use floatround()".into(), "int_native_float", false));
+        }
+
+        if config.enabled("cs_float_int") && RE_CS_INT_FLOAT.is_match(san) {
+            issues.push(iss(lineno, "integer literal into a cstrike.inc Float parameter (warning 213); e.g. cs_set_c4_explode_time(id, 10) becomes ~1.4e-44 - add .0".into(), "cs_float_int", false));
+        }
+
+        if config.enabled("fun_float_int") && RE_FUN_INT_FLOAT.is_match(san) {
+            issues.push(iss(lineno, "integer literal into set_user_maxspeed/set_user_gravity's Float parameter (warning 213); e.g. set_user_gravity(id, 1) becomes ~1.4e-45 - add .0".into(), "fun_float_int", false));
+        }
+
+        for (rule_id, msg) in engfunc_param_mismatches(san) {
+            if config.enabled(rule_id) {
+                issues.push(iss(lineno, msg, rule_id, false));
+            }
+        }
+
+        if config.enabled("entity_ev_type_mismatch") {
+            for msg in entity_ev_mismatch(san) {
+                issues.push(iss(lineno, msg, "entity_ev_type_mismatch", false));
+            }
+        }
+
+        for (rule_id, msg) in ham_param_mismatches(san) {
+            if config.enabled(rule_id) {
+                issues.push(iss(lineno, msg, rule_id, false));
+            }
+        }
+
+        for (rule_id, msg) in amxmodx_param_mismatches(san) {
+            if config.enabled(rule_id) {
+                issues.push(iss(lineno, msg, rule_id, false));
+            }
         }
 
         // --- runtime crashes ---
@@ -469,6 +834,11 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                     issues.push(iss(lineno, format!("set_hudmessage channel {} - clients only have channels 1-4 (or -1 auto); other values are masked by the engine and stomp channels unpredictably", ch), "hud_channel_range", false));
                 }
             }
+        }
+
+        if config.enabled("geoip_code_overflow") && let Some(caps) = RE_GEOIP_CODE_OVERFLOW.captures(san) {
+            let name = caps.get(1).unwrap().as_str();
+            issues.push(iss(lineno, format!("{}() overflows its result buffer by one cell on an unknown IP - use {}_ex() instead", name, name), "geoip_code_overflow", false));
         }
 
         // --- deprecated / defines ---
@@ -784,6 +1154,51 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
         }
     }
 
+    if config.enabled("remove_entity_in_damage_hook") {
+        for caps in RE_HAM_DMG_CB.captures_iter(raw_clean) {
+            let cb = caps.get(2).unwrap().as_str();
+            let body = find_function_body_in(lines, cb);
+            if body.is_empty() { continue; }
+            // The safe fix moves remove_entity() into a separate set_task callback, so a
+            // hook body that still calls it directly is the crash-prone synchronous case.
+            if RE_SYNC_REMOVE_ENT.is_match(&body) {
+                let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+                issues.push(iss(lineno, format!("remove_entity() runs synchronously inside the Ham_TakeDamage callback \"{}\" - multi-pellet weapons (shotgun) free the edict mid-FireBullets and later pellets deref it -> server freeze; defer via set_task or set pev_flags FL_KILLME", cb), "remove_entity_in_damage_hook", false));
+            }
+        }
+    }
+
+    if config.enabled("set_ham_param_mismatch") {
+        // SetHamParamFloat/Integer(which, ..) picks the setter by hand instead of by tag -
+        // "which" is the 1-indexed position in the Ham_* forward's own declared parameter
+        // list (e.g. Ham_TakeDamage's function(this, idinflictor, idattacker, Float:damage,
+        // damagebits) makes SetHamParamFloat(4, ..) correct and SetHamParamInteger(4, ..)
+        // wrong), and nothing enforces that the setter family matches the slot's real type.
+        for caps in RE_REGISTERHAM_ANY.captures_iter(raw_clean) {
+            let ham = caps.get(1).unwrap().as_str();
+            let cb = caps.get(2).unwrap().as_str();
+            let Some((_, types)) = HAM_WHICH_PARAM_TYPES.iter().find(|(name, _)| *name == ham) else { continue };
+            let body = find_function_body_in(lines, cb);
+            if body.is_empty() { continue; }
+            let cb_def_re = Regex::new(&format!(r"\bpublic\s+{}\s*\(", regex::escape(cb))).unwrap();
+            let cb_start = lines.iter().position(|ln| cb_def_re.is_match(ln));
+            for pcaps in RE_SET_HAM_PARAM.captures_iter(&body) {
+                let setter_family = if &pcaps[1] == "Float" { EfType::F } else { EfType::I };
+                let Ok(which) = pcaps[2].parse::<usize>() else { continue };
+                let Some(expected) = which.checked_sub(1).and_then(|i| types.get(i)) else { continue };
+                if *expected != setter_family {
+                    let lineno = cb_start.map(|s| s + 1 + body[..pcaps.get(0).unwrap().start()].matches('\n').count()).unwrap_or(0);
+                    issues.push(iss(lineno, format!(
+                        "SetHamParam{}({}, ..) in \"{}\" targets {}'s parameter #{}, which is {} - use SetHamParam{}() instead",
+                        &pcaps[1], which, cb, ham, which,
+                        if *expected == EfType::F { "Float" } else { "int/entity" },
+                        if *expected == EfType::F { "Float" } else { "Integer" }
+                    ), "set_ham_param_mismatch", false));
+                }
+            }
+        }
+    }
+
     if config.enabled("zp43_mixing") && raw_clean.contains("#include <zombieplague>")
         && (raw_clean.contains("#include <zp50_") || RE_ZP43_NATIVE.is_match(raw_clean).eq(&false))
         && raw_clean.contains("#include <zp50_") {
@@ -852,6 +1267,110 @@ mod tests {
         assert!(r.contains(&"int_native_float"));
         let ok = lint_str("intok", "public f(id) {\n\tset_user_health(id, 100)\n}\n");
         assert!(!ok.contains(&"int_native_float"));
+    }
+
+    #[test]
+    fn engfunc_int_float() {
+        let r = lint_str("engf1", "public f(id) {\n\tengfunc(EngFunc_WriteByte, 1.0)\n}\n");
+        assert!(r.contains(&"engfunc_int_float"));
+        let r2 = lint_str("engf2", "public f(id, Float:origin[3], Float:dist) {\n\tengfunc(EngFunc_WalkMove, id, origin, dist, 1.0)\n}\n");
+        assert!(r2.contains(&"engfunc_int_float"));
+        let ok = lint_str("engfok", "public f(id) {\n\tengfunc(EngFunc_WriteByte, 1)\n}\n");
+        assert!(!ok.contains(&"engfunc_int_float"));
+        let ok2 = lint_str("engfok2", "public f(id, Float:origin[3], Float:dist) {\n\tengfunc(EngFunc_WalkMove, id, origin, dist, WALKMOVE_NORMAL)\n}\n");
+        assert!(!ok2.contains(&"engfunc_int_float"));
+    }
+
+    #[test]
+    fn engfunc_float_int() {
+        // int literal into a Float parameter -> flagged
+        let r = lint_str("engfi1", "public f(id) {\n\tengfunc(EngFunc_SetClientMaxspeed, id, 300)\n}\n");
+        assert!(r.contains(&"engfunc_float_int"));
+        // 12-arg PlaybackEvent: fparam1 (Float, position 7) as a bare int literal -> flagged
+        let r2 = lint_str("engfi2", "public f() {\n\tnew Float:o[3]; new Float:a[3];\n\tengfunc(EngFunc_PlaybackEvent, 0, 0, 0, 0.1, o, a, 5, 0.0, 0, 0, 0, 0)\n}\n");
+        assert!(r2.contains(&"engfunc_float_int"));
+        // correctly typed -> not flagged
+        let ok = lint_str("engfiok", "public f(id) {\n\tengfunc(EngFunc_SetClientMaxspeed, id, 300.0)\n}\n");
+        assert!(!ok.contains(&"engfunc_float_int"));
+        // bare int literal 0 is bit-identical to 0.0 - exempt
+        let ok2 = lint_str("engfiok2", "public f(id) {\n\tengfunc(EngFunc_SetClientMaxspeed, id, 0)\n}\n");
+        assert!(!ok2.contains(&"engfunc_float_int"));
+    }
+
+    #[test]
+    fn entity_ev_type_mismatch() {
+        // EV_FL_ (Float family) field passed to the int native -> flagged
+        let r = lint_str("evmis1", "public f(id) {\n\tentity_set_int(id, EV_FL_gravity, 2)\n}\n");
+        assert!(r.contains(&"entity_ev_type_mismatch"));
+        // EV_INT_ field passed to the float native -> flagged
+        let r2 = lint_str("evmis2", "public f(id) {\n\tentity_set_float(id, EV_INT_effects, 1.0)\n}\n");
+        assert!(r2.contains(&"entity_ev_type_mismatch"));
+        // EV_VEC_ field passed to entity_get_int -> flagged
+        let r3 = lint_str("evmis3", "public f(id) {\n\tnew x = entity_get_int(id, EV_VEC_origin)\n}\n");
+        assert!(r3.contains(&"entity_ev_type_mismatch"));
+        // correctly matched family -> not flagged
+        let ok = lint_str("evok", "public f(id) {\n\tentity_set_float(id, EV_FL_gravity, 2.0)\n\tentity_set_int(id, EV_INT_effects, 1)\n}\n");
+        assert!(!ok.contains(&"entity_ev_type_mismatch"));
+    }
+
+    #[test]
+    fn ham_param_mismatch() {
+        // int literal into Ham_TakeDamage's Float damage slot -> flagged
+        let r = lint_str("ham1", "public f(victim, id) {\n\tExecuteHamB(Ham_TakeDamage, victim, id, id, 25, DMG_ACID)\n}\n");
+        assert!(r.contains(&"ham_float_int"));
+        // float literal into Ham_Use's int use_type slot -> flagged
+        let r2 = lint_str("ham2", "public f(ent, a, b) {\n\tExecuteHam(Ham_Use, ent, a, b, 1.0, 300.0)\n}\n");
+        assert!(r2.contains(&"ham_int_float"));
+        // correctly typed -> not flagged
+        let ok = lint_str("hamok", "public f(victim, id) {\n\tExecuteHamB(Ham_TakeDamage, victim, id, id, 25.0, DMG_ACID)\n}\n");
+        assert!(!ok.contains(&"ham_float_int"));
+        assert!(!ok.contains(&"ham_int_float"));
+        // a variable/constant argument can't be statically checked - must not flag
+        let ok2 = lint_str("hamokvar", "public f(victim, id, Float:dmg) {\n\tExecuteHamB(Ham_TakeDamage, victim, id, id, dmg, DMG_ACID)\n}\n");
+        assert!(!ok2.contains(&"ham_float_int"));
+        assert!(!ok2.contains(&"ham_int_float"));
+    }
+
+    #[test]
+    fn cs_float_int_rule() {
+        let r = lint_str("csfi1", "public f(id) {\n\tcs_set_c4_explode_time(id, 10)\n}\n");
+        assert!(r.contains(&"cs_float_int"));
+        let r2 = lint_str("csfi2", "public f(id) {\n\tcs_set_user_lastactivity(id, 5)\n}\n");
+        assert!(r2.contains(&"cs_float_int"));
+        let ok = lint_str("csfiok", "public f(id) {\n\tcs_set_c4_explode_time(id, 10.0)\n}\n");
+        assert!(!ok.contains(&"cs_float_int"));
+        // bare 0 is bit-identical to 0.0 - exempt
+        let ok2 = lint_str("csfiok2", "public f(id) {\n\tcs_set_c4_explode_time(id, 0)\n}\n");
+        assert!(!ok2.contains(&"cs_float_int"));
+    }
+
+    #[test]
+    fn fun_float_int_rule() {
+        let r = lint_str("funfi1", "public f(id) {\n\tset_user_gravity(id, 1)\n}\n");
+        assert!(r.contains(&"fun_float_int"));
+        let r2 = lint_str("funfi2", "public f(id) {\n\tset_user_maxspeed(id, 250)\n}\n");
+        assert!(r2.contains(&"fun_float_int"));
+        let ok = lint_str("funfiok", "public f(id) {\n\tset_user_gravity(id, 1.0)\n\tset_user_maxspeed(id, 250.0)\n}\n");
+        assert!(!ok.contains(&"fun_float_int"));
+        let ok2 = lint_str("funfiok2", "public f(id) {\n\tset_user_gravity(id, 0)\n}\n");
+        assert!(!ok2.contains(&"fun_float_int"));
+    }
+
+    #[test]
+    fn amxmodx_param_mismatch() {
+        // fxtime (param #7) is Float - bare int literal is wrong
+        let r = lint_str("amx1", "public f(id) {\n\tset_hudmessage(255, 0, 0, -1.0, 0.35, 0, 6, 12.0, 0.1, 0.2)\n}\n");
+        assert!(r.contains(&"amxmodx_float_int"));
+        // x (param #4) is Float - float literal is correct, but flip channel(int, #6) to a float -> wrong
+        let r2 = lint_str("amx2", "public f(id) {\n\temit_sound(id, 1, \"sound.wav\", 1.0, 0.8, 1.5, 100)\n}\n");
+        assert!(r2.contains(&"amxmodx_int_float"));
+        // change_task's newTime (param #2) is Float
+        let r3 = lint_str("amx3", "public f() {\n\tchange_task(1, 5, 0)\n}\n");
+        assert!(r3.contains(&"amxmodx_float_int"));
+        // all correctly typed -> not flagged
+        let ok = lint_str("amxok", "public f(id) {\n\tset_hudmessage(255, 0, 0, -1.0, 0.35, 0, 6.0, 12.0, 0.1, 0.2)\n\temit_sound(id, 1, \"sound.wav\", 1.0, 0.8, 0, 100)\n\tchange_task(1, 5.0, 0)\n}\n");
+        assert!(!ok.contains(&"amxmodx_float_int"));
+        assert!(!ok.contains(&"amxmodx_int_float"));
     }
 
     #[test]
@@ -935,6 +1454,36 @@ mod tests {
         assert!(r2.contains(&"strcmp_truthy"));
         let ok2 = lint_str("strcok", "public f() {\n\tnew a[8], b[8];\n\tif (strcmp(a, b) == 0) return 1;\n\treturn 0;\n}\n");
         assert!(!ok2.contains(&"strcmp_truthy"));
+    }
+
+    #[test]
+    fn sql_fieldname_truthy_rule() {
+        let r = lint_str("sqlfn", "public f(query) {\n\tif (SQL_FieldNameToNum(query, \"id\")) return 1;\n\treturn 0;\n}\n");
+        assert!(r.contains(&"sql_fieldname_truthy"));
+        let ok = lint_str("sqlfnok", "public f(query) {\n\tif (SQL_FieldNameToNum(query, \"id\") != -1) return 1;\n\treturn 0;\n}\n");
+        assert!(!ok.contains(&"sql_fieldname_truthy"));
+        // assigning to a variable first (the common real-world idiom) is not a bare-truthy use
+        let ok2 = lint_str("sqlfnvar", "public f(query) {\n\tnew col = SQL_FieldNameToNum(query, \"id\");\n\treturn col;\n}\n");
+        assert!(!ok2.contains(&"sql_fieldname_truthy"));
+    }
+
+    #[test]
+    fn func_id_truthy_rule() {
+        // direct bare call in the condition
+        let r = lint_str("fid1", "public f(name[]) {\n\tif (get_xvar_id(name)) return 1;\n\treturn 0;\n}\n");
+        assert!(r.contains(&"func_id_truthy"));
+        // real-world idiom: assign to a variable, then test it bare a couple lines later
+        // (regression case from meus_plugins_organizados/plmenu.sma)
+        let r2 = lint_str("fid2", "public f(name[]) {\n\tnew x = get_xvar_id(name);\n\tif (x) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(r2.contains(&"func_id_truthy"));
+        // get_func_id, negated bare check
+        let r3 = lint_str("fid3", "public f(cb[]) {\n\tnew fid = get_func_id(cb);\n\tif (!fid) return 0;\n\treturn 1;\n}\n");
+        assert!(r3.contains(&"func_id_truthy"));
+        // correctly compared with != -1 -> not flagged
+        let ok = lint_str("fidok", "public f(name[]) {\n\tnew x = get_xvar_id(name);\n\tif (x != -1) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(!ok.contains(&"func_id_truthy"));
+        let ok2 = lint_str("fidok2", "public f(name[]) {\n\tif (get_xvar_id(name) != -1) return 1;\n\treturn 0;\n}\n");
+        assert!(!ok2.contains(&"func_id_truthy"));
     }
 
     #[test]
@@ -1119,6 +1668,17 @@ mod tests {
     }
 
     #[test]
+    fn geoip_code_overflow_rule() {
+        let r = lint_str("geo1", "public f(ip[16]) {\n\tnew code[3];\n\tgeoip_code2(ip, code);\n}\n");
+        assert!(r.contains(&"geoip_code_overflow"));
+        let r2 = lint_str("geo2", "public f(ip[16]) {\n\tnew code[4];\n\tgeoip_code3(ip, code);\n}\n");
+        assert!(r2.contains(&"geoip_code_overflow"));
+        // the _ex variants are the documented-safe replacement - must not flag
+        let ok = lint_str("geook", "public f(ip[16]) {\n\tnew code[3];\n\tgeoip_code2_ex(ip, code);\n}\n");
+        assert!(!ok.contains(&"geoip_code_overflow"));
+    }
+
+    #[test]
     fn string_assign_rule() {
         let r = lint_str("strassign", "public f() {\n\tnew msg[8];\n\tmsg = \"Hello World!\";\n}\n");
         assert!(r.contains(&"string_assign"));
@@ -1132,11 +1692,94 @@ mod tests {
     }
 
     #[test]
+    fn array_index_oob_rule() {
+        // exact size as index - classic off-by-one (valid range is 0..size-1)
+        let r = lint_str("oob1", "public f() {\n\tnew Players[32];\n\tPlayers[32] = 15;\n}\n");
+        assert!(r.contains(&"array_index_oob"));
+        // negative literal index
+        let r2 = lint_str("oob2", "public f() {\n\tnew Players[32];\n\tPlayers[-1] = 6;\n}\n");
+        assert!(r2.contains(&"array_index_oob"));
+        // in-bounds access -> not flagged
+        let ok = lint_str("oobok", "public f() {\n\tnew Players[32];\n\tPlayers[31] = 15;\n}\n");
+        assert!(!ok.contains(&"array_index_oob"));
+        // the declaration line itself must never self-flag
+        let ok2 = lint_str("oobdecl", "public f() {\n\tnew Players[32];\n}\n");
+        assert!(!ok2.contains(&"array_index_oob"));
+        // dynamic (variable) index can't be statically checked - must not flag
+        let ok3 = lint_str("oobdyn", "public f(i) {\n\tnew Players[32];\n\tPlayers[i] = 15;\n}\n");
+        assert!(!ok3.contains(&"array_index_oob"));
+        // regression: a later array in a multi-var `new` statement has no leading `new` of
+        // its own (`new name[32], authid[32]`) - must not be misread as an access to itself
+        let ok4 = lint_str("oobmultidecl", "public f() {\n\tnew name[32], authid[32];\n}\n");
+        assert!(!ok4.contains(&"array_index_oob"));
+        // regression: an array parameter in a function signature is a declaration too
+        let ok5 = lint_str("oobsig", "public f(id, msg[128]) {\n\treturn 1;\n}\n");
+        assert!(!ok5.contains(&"array_index_oob"));
+        // a comparison (read, not write) is intentionally out of scope - no false negative claim
+        let ok6 = lint_str("oobread", "public f() {\n\tnew Players[32];\n\tif (Players[32] > 0) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(!ok6.contains(&"array_index_oob"));
+    }
+
+    #[test]
+    fn array_compare_by_ref_rule() {
+        let r = lint_str("arrcmp", "public f() {\n\tnew arrayOne[3];\n\tnew arrayTwo[3];\n\tif (arrayOne == arrayTwo) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(r.contains(&"array_compare_by_ref"));
+        // element-by-element compare is the correct idiom -> not flagged
+        let ok = lint_str("arrcmpok", "public f() {\n\tnew arrayOne[3];\n\tnew arrayTwo[3];\n\tif (arrayOne[0] == arrayTwo[0]) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(!ok.contains(&"array_compare_by_ref"));
+        // scalar comparison must never be flagged
+        let ok2 = lint_str("arrcmpscalar", "public f(a, b) {\n\tif (a == b) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(!ok2.contains(&"array_compare_by_ref"));
+    }
+
+    #[test]
     fn div_by_runtime_rule() {
         let r = lint_str("div", "public f(total) {\n\tnew share = total / get_playersnum();\n\treturn share;\n}\n");
         assert!(r.contains(&"div_by_runtime"));
         // '%' and '/' inside strings must not fire
         let ok = lint_str("divok", "public f(id) {\n\tclient_print(id, print_chat, \"hp: %d / max\", 100);\n}\n");
         assert!(!ok.contains(&"div_by_runtime"));
+    }
+
+    #[test]
+    fn set_ham_param_mismatch_rule() {
+        // Ham_TakeDamage's parameter #4 is Float:damage - SetHamParamInteger there is wrong
+        let bad = lint_str("shp1",
+            "public plugin_init() {\n\tRegisterHam(Ham_TakeDamage, \"player\", \"fw_Dmg\", 0);\n}\npublic fw_Dmg(this, inflictor, attacker, Float:damage, dt) {\n\tSetHamParamInteger(4, 100);\n\treturn HAM_HANDLED;\n}\n");
+        assert!(bad.contains(&"set_ham_param_mismatch"));
+        // parameter #3 (idattacker) is int/entity - SetHamParamFloat there is wrong
+        let bad2 = lint_str("shp2",
+            "public plugin_init() {\n\tRegisterHam(Ham_TakeDamage, \"player\", \"fw_Dmg2\", 0);\n}\npublic fw_Dmg2(this, inflictor, attacker, Float:damage, dt) {\n\tSetHamParamFloat(3, 0.0);\n\treturn HAM_HANDLED;\n}\n");
+        assert!(bad2.contains(&"set_ham_param_mismatch"));
+        // correctly matched setter/position pairs -> not flagged
+        let ok = lint_str("shpok",
+            "public plugin_init() {\n\tRegisterHam(Ham_TakeDamage, \"player\", \"fw_Dmg3\", 0);\n}\npublic fw_Dmg3(this, inflictor, attacker, Float:damage, dt) {\n\tSetHamParamFloat(4, 25.0);\n\tSetHamParamInteger(3, 2);\n\treturn HAM_HANDLED;\n}\n");
+        assert!(!ok.contains(&"set_ham_param_mismatch"));
+        // regression: Ham_TraceAttack's Float:direction[3] (forward param #4) occupies THREE
+        // consecutive which-slots (4,5,6), one per vector component - not a single slot
+        // followed by int slots. Real corpus bug: an earlier table version flagged this.
+        let ok2 = lint_str("shpvec",
+            "public plugin_init() {\n\tRegisterHam(Ham_TraceAttack, \"player\", \"fw_Trace\", 0);\n}\npublic fw_Trace(victim, attacker, Float:damage, Float:direction[3], tracehandle, damage_type) {\n\tSetHamParamFloat(4, direction[0]);\n\tSetHamParamFloat(5, direction[1]);\n\tSetHamParamFloat(6, direction[2]);\n\treturn HAM_IGNORED;\n}\n");
+        assert!(!ok2.contains(&"set_ham_param_mismatch"));
+    }
+
+    #[test]
+    fn remove_entity_in_damage_hook_rule() {
+        // synchronous remove_entity inside a TakeDamage hook -> flagged
+        let bad = lint_str("rmdmg",
+            "public plugin_init() {\n\tRegisterHam(Ham_TakeDamage, \"info_target\", \"fw_Dmg\");\n}\npublic fw_Dmg(ent, i, a, Float:d, dt) {\n\tremove_entity(ent);\n\treturn HAM_SUPERCEDE;\n}\n");
+        assert!(bad.contains(&"remove_entity_in_damage_hook"));
+        // deferred removal (remove lives in the task callback) -> not flagged
+        let ok = lint_str("rmdmgok",
+            "public plugin_init() {\n\tRegisterHam(Ham_TakeDamage, \"info_target\", \"fw_Dmg\");\n}\npublic fw_Dmg(ent, i, a, Float:d, dt) {\n\tset_task(0.1, \"task_rm\", ent);\n\treturn HAM_SUPERCEDE;\n}\npublic task_rm(ent) {\n\tremove_entity(ent);\n}\n");
+        assert!(!ok.contains(&"remove_entity_in_damage_hook"));
+        // FL_KILLME (safe engine-deferred) -> not flagged
+        let ok2 = lint_str("rmdmgkill",
+            "public plugin_init() {\n\tRegisterHam(Ham_TakeDamage, \"info_target\", \"fw_Dmg2\");\n}\npublic fw_Dmg2(ent, i, a, Float:d, dt) {\n\tset_pev(ent, pev_flags, pev(ent, pev_flags) | FL_KILLME);\n\treturn HAM_SUPERCEDE;\n}\n");
+        assert!(!ok2.contains(&"remove_entity_in_damage_hook"));
+        // Ham_Touch self-remove (ubiquitous safe pickup idiom) -> intentionally NOT flagged
+        let ok3 = lint_str("rmtouch",
+            "public plugin_init() {\n\tRegisterHam(Ham_Touch, \"info_target\", \"fw_Tch\");\n}\npublic fw_Tch(ent, other) {\n\tremove_entity(ent);\n}\n");
+        assert!(!ok3.contains(&"remove_entity_in_damage_hook"));
     }
 }

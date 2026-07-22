@@ -593,7 +593,7 @@ static WARNING_RULES: &[&str] = &[
     "callback_not_defined", "zp50_register_return", "zp50_get_in_init",
     "zp_select_pre_filter", "zp_select_pre_return", "zp43_mixing", "entity_leak",
     "client_command_handled", "client_connect_actions", "contain_truthy",
-    "strcmp_truthy", "format_injection", "string_assign", "hud_channel_range",
+    "strcmp_truthy", "sql_fieldname_truthy", "func_id_truthy", "format_injection", "string_assign", "hud_channel_range",
     "line_too_long",
 ];
 

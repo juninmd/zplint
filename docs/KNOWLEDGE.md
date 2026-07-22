@@ -96,6 +96,32 @@ table: plugin_init/plugin_cfg/plugin_precache/plugin_end/plugin_natives take 0 a
 client_putinserver/client_command/client_infochanged take exactly 1.
 Sources: https://sampwiki.blast.hk/wiki/Errors_List · https://forums.alliedmods.net/archive/index.php/t-630.html
 
+### 1.15 Literal out-of-bounds array index `[rule: array_index_oob]`
+From the AMXX scripting primer's own worked example: `new Players[32]` has valid slots
+0..31, so `Players[32] = 15` (off-by-one, the classic beginner mistake) and `Players[-1] = 6`
+are both invalid — amxxpc rejects a constant out-of-range index at compile time
+(AMX_ERR_BOUNDS class). zplint checks this ahead of compilation using the whole-file
+`name -> declared size` map already built for `string_assign`. Scoped narrowly to WRITES
+(`name[N] =`, not reads/comparisons) on non-declaration lines, because a naive access-style
+regex misreads later arrays in a multi-var `new a[4], b[32]` statement as an access to
+themselves (`b[32]` has no `new` immediately in front of it) — false-positived hundreds of
+times on the real-world corpus before this fix; 0 hits after restricting to the write form.
+2-D arrays are only bound-checked on their first (outer) index; the second dimension isn't
+tracked (deferred, see 1.12).
+Sources: https://www.amxmodx.org/doc/source/scripting/primer.htm (section 2, "Arrays")
+
+### 1.16 Array compared by reference with ==/!= `[rule: array_compare_by_ref]`
+Also from the primer: `if (arrayOne == arrayTwo)` does not compile in Pawn — arrays are
+non-scalar, so `==`/`!=` on two bare array identifiers compares references, not contents (the
+primer's own example: `if ((arrayOne[0] == arrayTwo[0]) && ...)` is the correct element-wise
+form; `equal()`/`equali()` is the idiomatic form for strings). zplint flags `arr1 == arr2` /
+`arr1 != arr2` only when BOTH identifiers are in the declared-array-size map and neither is
+immediately followed by `[` (which would mean a valid per-element compare). 0 hits on both
+validation corpora (542-file real-world collection and the official amxmodx bundled plugins) —
+expected, since code that fails to compile does not usually ship, but the check is cheap and a
+real safety net for a plugin mid-edit.
+Sources: https://www.amxmodx.org/doc/source/scripting/primer.htm (sections 2 and 8, "Arrays" / "Two Dimensional Arrays")
+
 ---
 
 ## 2. Compiler Warnings That Are Real Bugs
@@ -127,6 +153,130 @@ https://wiki.alliedmods.net/Tags_(Scripting)
 `set_user_health(id, 100.0)` → 1120403456 hp (bit pattern as int). Int-param natives:
 set_user_health, set_user_armor, set_user_frags, cs_set_user_money, zp_ammopacks_set.
 Sources: http://www.amxmodx.org/doc/source/scripting/primer.htm
+
+### 2.5b engfunc() positional param type mismatch (reverse/forward 213) `[rules: engfunc_int_float, engfunc_float_int]`
+`engfunc(type, any:...)` is fully variadic in fakemeta.inc, so amxxpc cannot type-check its
+arguments at all — every EngFunc_* selector has its own fixed HLSDK signature (documented as
+a comment on the enum member in fakemeta_const.inc) that the compiler never verifies. zplint
+checks call-site literals positionally against a table built from those HLSDK signatures:
+- `engfunc_int_float` (float literal into an int/entity slot): WalkMove/MoveToOrigin's mode arg,
+  TraceLine/TraceHull/TraceModel/TraceSphere/TraceMonsterHull's hull/skip/flag args,
+  Write(Byte|Char|Short|Long|Entity)'s value, MessageBegin's msg_dest/msg_type/ed.
+- `engfunc_float_int` (int literal into a Float slot): WalkMove's yaw/dist, MoveToOrigin's dist,
+  TraceSphere's radius, GetAimVector's speed, EmitSound/EmitAmbientSound's volume/attenuation,
+  ParticleEffect's color/count, SetClientMaxspeed's speed, AnimationAutomove's flTime,
+  CrosshairAngle's pitch/yaw, RunPlayerMove's forwardmove/sidemove/upmove,
+  BuildSoundMsg's volume/attenuation, PlaybackEvent's delay/fparam1/fparam2,
+  WriteCoord/WriteAngle's value. `FadeClientVolume`'s 4 args are ALL ints despite reading like
+  durations - a real-world corpus hit confirmed `engfunc(EngFunc_WriteCoord, 36)` (bare int,
+  reinterpreted as ~5e-44) instead of `36.0`.
+Bare `0`/`-0` is exempt in both directions: its bit pattern is identical to `0.0`, so no bug.
+Vector (`Float:x[3]`), string, and TraceResult-handle arguments are always passed as variables
+in practice (never literals), so those positions are intentionally left unchecked.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/fakemeta.inc ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/fakemeta_const.inc ·
+https://wiki.alliedmods.net/Engine_Functions_(FAKEMETA) ·
+https://wiki.alliedmods.net/Tags_(Scripting)
+
+### 2.5c Engine module EV_* constant/native family mismatch `[rule: entity_ev_type_mismatch]`
+The Engine module's `entity_get_*`/`entity_set_*` natives (engine.inc) are keyed by an `EV_*`
+constant (engine_const.inc) whose prefix names the field's real storage type — `EV_INT_*` (36
+constants: movetype, solid, effects, flags, team, ...), `EV_FL_*` (39: health, gravity, speed,
+armorvalue, maxspeed, fuser1-4, ...), `EV_VEC_*` (23: origin, velocity, angles, mins/maxs, ...),
+`EV_ENT_*` (11: owner, aiment, enemy, groundentity, ...), `EV_SZ_*` (13: classname, model,
+target, ...), `EV_BYTE_*` (6: controller1-4, blending1-2). Neither the compiler nor the native
+itself checks that the constant's family matches the function called — `entity_set_int(id,
+EV_FL_gravity, 2)` silently writes an int bit pattern into a field the engine reads back as a
+float (same failure mode as 2.4/2.5, just via the Engine module instead of fakemeta/pev). This
+is exactly the AMXX scripting-tutorial's own "Advanced Topics" example
+(`entity_set_int(player, EV_FL_armorvalue, value)`) — the prefix alone is enough to resolve the
+correct native family, so the detector needs no per-constant table, just the 6 prefix->family
+pairs. 0 hits (true or false) on both validation corpora — the API is simple enough that real
+plugins get it right, but the check is essentially free and catches the copy-paste-wrong-EV_
+case (e.g. copying an `EV_FL_` line and changing only the field name, forgetting the field
+moved families).
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/engine.inc ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/engine_const.inc ·
+https://www.amxmodx.org/doc/source/scripting/advanced.htm (section 8, "Entities")
+
+### 2.5d Hamsandwich ExecuteHam(B) positional param type mismatch `[rules: ham_int_float, ham_float_int]`
+Same failure class as 2.5b (`engfunc`), same root cause: `native ExecuteHam(Ham:function, this,
+any:...)` is fully variadic (hamsandwich.inc), so amxxpc cannot type-check its arguments either.
+Every `Ham_*` forward's real parameter list is documented as a "Forward params:" comment on its
+enum member in ham_const.inc (~470 members total). Most are specific to other mods (TFC/NS/
+SC/ESF/DOD/TS) and irrelevant to CS/ZP scripting, so the table is deliberately small and
+curated to the handful actually seen in this domain: `Ham_TakeDamage` (this, idinflictor,
+idattacker, Float:damage, damagebits), `Ham_TakeHealth` (this, Float:health, damagebits),
+`Ham_TraceAttack` (this, idattacker, Float:damage, Float:direction[3], traceresult,
+damagebits), `Ham_Use` (this, idcaller, idactivator, use_type, Float:value),
+`Ham_CS_Player_Blind` (this, Float:blindTime, Float:duration, Float:holdTime, alpha),
+`Ham_CS_Player_GetAutoaimVector` (this, Float:delta, Float:output[3] byref). Checked against
+both `ExecuteHam()` and `ExecuteHamB()` (the "block" variant most ZP code actually uses for
+`Ham_TakeDamage`). 0 hits on both validation corpora, including 26 real `ExecuteHamB(Ham_
+TakeDamage, ...)` call sites in the 542-file corpus — all correctly typed (`25.0`, `float(dmg)`,
+a `Float:`-tagged variable, or `get_pcvar_float(...)`), so this is a safety net rather than a
+demonstrated bug source, same posture as 2.5c.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/hamsandwich.inc ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/ham_const.inc
+
+### 2.5e SetHamParam{Integer,Float}(which, ..) setter/slot mismatch `[rule: set_ham_param_mismatch]`
+A different angle on the same Hamsandwich forwards from 2.5d: pre-hook code overrides an
+incoming parameter via `SetHamParamFloat(which, ..)`/`SetHamParamInteger(which, ..)`, where
+`which` is the 1-indexed position in the *forward's own* declared parameter list (`this` = 1).
+Nothing cross-checks that the setter family (Integer vs Float) matches the real type of that
+slot, so `SetHamParamInteger(4, 100)` inside a `Ham_TakeDamage` hook (slot 4 = `Float:damage`)
+silently corrupts the damage value — same bit-reinterpretation bug as 2.5d, reached through a
+different native pair. This check is stronger than 2.5d's: it flags on the setter function
+chosen, not on whether the value happens to look like a literal, so a wrong setter is caught
+even when called with a variable or expression. Traced by matching `RegisterHam(Ham_X, "class",
+"callback")` registrations against `callback`'s body (reusing `find_function_body_in`, the same
+scope-tracing helper `message_hook_scope`/`deathmsg_killer_guard` already use).
+**Vector correction found via corpus validation:** a `Float:vec[3]` forward parameter consumes
+**three consecutive** `which` slots (one per x/y/z component), not one — `Ham_TraceAttack`'s
+`Float:direction[3]` (its 4th forward param) is addressed as which=4,5,6, shifting `traceresult`
+to which=7 and `damagebits` to which=8. An initial version of this table treated the vector as
+a single opaque slot and misread `SetHamParamFloat(5, direction[1] * resist)` /
+`SetHamParamFloat(6, direction[2] * resist)` — real code from
+`04-Complementos/zp50_addon_evolution.sma` — as writing into TraceAttack's (nonexistent, in
+that numbering) int slots. Fixed with a second, which-expanded table (`HAM_WHICH_PARAM_TYPES`)
+kept separate from 2.5d's `ExecuteHam`-args table (where the same vector is one call argument,
+not three). 0 hits on both validation corpora after the fix.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/hamsandwich.inc ·
+real-corpus regression case (`zp50_addon_evolution.sma`)
+
+### 2.5f cstrike.inc int literal in Float parameter `[rule: cs_float_int]`
+Same failure class as 2.4, applied to cstrike.inc's single-arg Float setters:
+`cs_set_user_lastactivity`, `cs_set_hostage_lastuse`, `cs_set_hostage_nextuse`,
+`cs_set_c4_explode_time` all take `(index, Float:value)`. A bare int literal (e.g.
+`cs_set_c4_explode_time(id, 10)` instead of `10.0`) is bit-reinterpreted the same way as
+`pev_health`. Literal `0`/`-0` is exempt (bit-identical to `0.0`). 0 hits on both corpora — none
+of these four natives appear anywhere in the 542-file real-world collection, so this is a purely
+preventive, zero-cost rule rather than a demonstrated bug source.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/cstrike.inc
+
+### 2.5g fun.inc int literal in Float parameter `[rule: fun_float_int]`
+`set_user_maxspeed(index, Float:speed)` / `set_user_gravity(index, Float:gravity)` - same bug
+class as 2.4/2.5f, but for two of the most heavily used ZP class-scripting natives (hundreds of
+call sites across the 542-file corpus, e.g. `set_user_gravity(id, 1)` instead of `1.0` would
+silently set gravity to ~1.4e-45). 0 hits — every real call site sampled uses a `.0` literal,
+a `Float:`-tagged variable, or `get_pcvar_float(...)`, so this is a safety net confirmed against
+heavy real usage rather than a demonstrated bug source.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/fun.inc
+
+### 2.5h amxmodx.inc positional param type mismatch `[rules: amxmodx_int_float, amxmodx_float_int]`
+Unlike 2.5b/2.5d (`engfunc`/`ExecuteHam`, both fully variadic `any:...` dispatchers where the
+compiler cannot type-check anything), `set_hudmessage`, `set_dhudmessage`, `emit_sound`, and
+`change_task` are NORMALLY tagged natives — amxxpc already emits warning 213 for a mismatch
+here, same as `set_task`'s interval. zplint duplicates that check ahead of compilation using a
+positional type table, same mechanism as `engfunc_int_float`/`engfunc_float_int` but keyed
+directly by function name (no dispatcher selector to skip, so table index 0 = the first real
+argument): `set_hudmessage(r, g, b, Float:x, Float:y, effects, Float:fxtime, Float:holdtime,
+Float:fadeintime, Float:fadeouttime, channel, alpha1, color2[4])`, `set_dhudmessage` (same
+first 10 params), `emit_sound(index, channel, sample[], Float:vol, Float:att, flags, pitch)`,
+`change_task(id, Float:newTime, outside)`. These are extremely common in ZP HUD/sound code
+(hundreds of call sites across the real-world corpus) yet 0 hits — every sampled call site was
+already correctly typed.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/amxmodx.inc
 
 ### 2.6 Unreachable code (warning 225) `[rule: unreachable_code]`
 Statements after unconditional return/break/continue. Real case: amxmodx's own amxmisc.inc
@@ -218,6 +368,18 @@ Always pin a literal: `client_print(0, print_chat, "%s", said)`.
 Sources: https://www.amxmodx.org/api/amxmodx/client_print ·
 https://github.com/alliedmodders/amxmodx/issues/776
 
+### 3.8 Synchronous remove_entity in a damage hook `[rule: remove_entity_in_damage_hook]`
+`remove_entity(ent)` called directly inside a `Ham_TakeDamage` callback frees the edict
+mid-`FireBullets`; a multi-pellet weapon (shotgun/multiple hits in the same frame) then
+dereferences the freed edict on the next pellet → segfault / server freeze. `is_valid_ent`
+at the top does not help — the engine still holds the pointer. Fix: neutralize in-frame
+(dying flag + DAMAGE_NO + SOLID_NOT + EF_NODRAW so later pellets no-op) and defer the real
+`remove_entity` via `set_task`, or set `pev_flags | FL_KILLME` (engine removes next frame).
+Scoped to Ham_TakeDamage only — self-removing pickups in Ham_Touch are the ubiquitous safe
+idiom and are intentionally not flagged.
+Confirmed in this repo: zp50_atmospheric_headcrabs (shoot headcrab → freeze), and latent in
+zp50_extra_headcrab / zp50_class_overlord.
+
 ---
 
 ## 4. Engine / HLDS Pitfalls
@@ -283,6 +445,14 @@ Official docs: "called too early to do anything that directly affects the client
 client_print/set_user_*/show_menu there silently no-op or throw error 10. Use
 client_putinserver.
 Sources: https://www.amxmodx.org/api/amxmodx/client_connect
+
+### 4.10 geoip_code2/3 one-cell buffer overflow `[rule: geoip_code_overflow]`
+geoip.inc documents that the (non-`_ex`) `geoip_code2`/`geoip_code3` natives overflow their
+result buffer by one cell on an unknown IP — a native-implementation defect, not a caller
+mistake, but one with a trivial fix: use `geoip_code2_ex`/`geoip_code3_ex` instead. Extremely
+low real-world reach (only 1 call site in the 542-file corpus, already using the safe `_ex`
+form), but the check is a single regex line, so the cost is effectively zero.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/geoip.inc
 
 ---
 
@@ -384,6 +554,33 @@ https://forums.alliedmods.net/archive/index.php/t-214127.html
   %s input produces corrupted output; format() handles overlap.
 Sources: https://www.amxmodx.org/api/string ·
 https://wiki.alliedmods.net/Optimizing_Plugins_(AMX_Mod_X_Scripting)
+
+- `[rule: sql_fieldname_truthy]` sqlx.inc's `SQL_FieldNameToNum(query, name)` returns **-1
+  on failure**, but column indices are 0-based, so `if (SQL_FieldNameToNum(query, "id"))`
+  misreads a valid match on column 0 as failure — same truthy-return-value bug class as
+  `contain_truthy`/`strcmp_truthy` above, found while checking sqlx.inc for the Float/int
+  mismatch class (that file has none — all-string/handle natives). 5 real call sites in the
+  542-file corpus (`admin.sma`, `mysql.inc`) all assign the result to a variable first
+  (`new qcolAuth = SQL_FieldNameToNum(...)`) rather than testing it bare, so 0 hits — a
+  preventive rule for the one idiom that would actually be wrong, not a demonstrated bug source.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/sqlx.inc
+
+- `[rule: func_id_truthy]` amxmodx.inc's `get_func_id()`/`get_xvar_id()` return **-1 on
+  failure**, but their docs explicitly state valid ids are `>=0` — id 0 is real and falsy, same
+  bug class as the two rules above. Checks both the direct-call form (`if (get_xvar_id(..))`)
+  and the far more common real idiom, an intermediate variable tested a line or two later
+  (`new x = get_xvar_id(name); if (x) ...`), traced via `enclosing_body()` the same way
+  `zp_fw_attacker_guard`/`zp_select_pre_filter` already trace variable usage across a function.
+  **Confirmed as a real, live bug, not just a theoretical risk:** `plmenu.sma` — bundled with
+  the official `alliedmodders/amxmodx` distribution itself (present under `plugins/`, `plugins/
+  dod/`, `plugins/ns/`, `plugins/tfc/` — 4 copies, all identical) and separately present in the
+  542-file real-world ZP corpus — contains exactly this bug at `new x = get_xvar_id("g_temp
+  Bans"); if (x)`. Severity is `warning` (matching its sibling truthy rules), which is also why
+  this was initially miscategorized as `error` and technically broke the "0 errors on official
+  plugins" baseline gate until fixed — a good reminder to add every new rule to both the
+  detector table and `WARNING_RULES` in the same change when it belongs there.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/amxmodx.inc ·
+real-corpus + official-bundled-plugin regression case (`plmenu.sma`)
 
 ---
 
