@@ -532,10 +532,23 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
 
     // Declared array sizes (any scope) for string_assign.
     let mut array_sizes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Same name declared with two different sizes in different scopes of the same file (e.g.
+    // a local `parm[1]` in one function and an unrelated local `parm[2]` in another) makes the
+    // single first-match-wins size below unsafe for OOB bound-checking, even though it's an
+    // acceptable approximation for string_assign (which only misses a too-permissive size, not
+    // a wrong one). array_index_oob uses this stricter map instead and skips ambiguous names.
+    let mut array_sizes_unambiguous: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut array_sizes_ambiguous: HashSet<String> = HashSet::new();
     for (san, _) in &sanitized {
         for caps in RE_ARRAY_SIZE_DECL.captures_iter(san) {
             if let Ok(n) = caps.get(2).unwrap().as_str().parse::<usize>() {
-                array_sizes.entry(caps.get(1).unwrap().as_str().to_string()).or_insert(n);
+                let name = caps.get(1).unwrap().as_str().to_string();
+                array_sizes.entry(name.clone()).or_insert(n);
+                match array_sizes_unambiguous.get(&name) {
+                    Some(&existing) if existing != n => { array_sizes_unambiguous.remove(&name); array_sizes_ambiguous.insert(name); }
+                    None if !array_sizes_ambiguous.contains(&name) => { array_sizes_unambiguous.insert(name, n); }
+                    _ => {}
+                }
             }
         }
     }
@@ -653,7 +666,7 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                 let m = caps.get(0).unwrap();
                 if san.as_bytes().get(m.end()).copied() == Some(b'=') { continue; } // `==`, not assignment
                 let name = caps.get(1).unwrap().as_str();
-                let Some(&size) = array_sizes.get(name) else { continue };
+                let Some(&size) = array_sizes_unambiguous.get(name) else { continue };
                 let Ok(idx) = caps.get(2).unwrap().as_str().parse::<i64>() else { continue };
                 if idx < 0 || idx as u64 >= size as u64 {
                     issues.push(iss(lineno, format!(
@@ -1718,6 +1731,14 @@ mod tests {
         // a comparison (read, not write) is intentionally out of scope - no false negative claim
         let ok6 = lint_str("oobread", "public f() {\n\tnew Players[32];\n\tif (Players[32] > 0) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
         assert!(!ok6.contains(&"array_index_oob"));
+        // regression (found validating against a real 542-file plugin corpus, sh_uchiha.sma):
+        // the same name declared with two DIFFERENT sizes in two unrelated local scopes must
+        // not be bound-checked against either size - the whole-file array_sizes map can't tell
+        // which declaration is in scope at the access site, so a name with conflicting sizes
+        // is ambiguous and must be skipped entirely rather than checked against a stale value.
+        let ok7 = lint_str("oobambiguous",
+            "public f() {\n\tnew parm[1];\n\tparm[0] = 1;\n}\npublic g() {\n\tnew parm[2];\n\tparm[0] = 1;\n\tparm[1] = 2;\n}\n");
+        assert!(!ok7.contains(&"array_index_oob"));
     }
 
     #[test]

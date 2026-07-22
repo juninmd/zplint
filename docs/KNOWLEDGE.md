@@ -108,7 +108,16 @@ themselves (`b[32]` has no `new` immediately in front of it) — false-positived
 times on the real-world corpus before this fix; 0 hits after restricting to the write form.
 2-D arrays are only bound-checked on their first (outer) index; the second dimension isn't
 tracked (deferred, see 1.12).
-Sources: https://www.amxmodx.org/doc/source/scripting/primer.htm (section 2, "Arrays")
+**Second real-corpus fix:** the shared `array_sizes` map is whole-file and first-declaration-
+wins, which is an acceptable approximation for `string_assign` (only makes it more permissive)
+but not for OOB bound-checking, which needs the *exact* size. `sh_uchiha.sma` in the 542-file
+corpus declares a local `parm[1]` in one function and an unrelated local `parm[2]` in another;
+`array_index_oob` used the cached size-1 for both, flagging `parm[1] = 40` (valid for the
+size-2 declaration) as out of bounds. Fixed with a second, stricter map
+(`array_sizes_unambiguous`) that drops any name seen with two different declared sizes anywhere
+in the file, rather than keeping whichever was found first. 0 hits on both corpora after the fix.
+Sources: https://www.amxmodx.org/doc/source/scripting/primer.htm (section 2, "Arrays") ·
+real-corpus regression case (`sh_uchiha.sma`)
 
 ### 1.16 Array compared by reference with ==/!= `[rule: array_compare_by_ref]`
 Also from the primer: `if (arrayOne == arrayTwo)` does not compile in Pawn — arrays are
