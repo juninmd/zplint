@@ -66,6 +66,15 @@ registradas porque custaram investigação:
 - **Aritmética rational não dobra**: `1.5 + 2.5` cai em `check_userop` (o `float.inc` define
   `operator+(Float:,Float:)`) e vira `iEXPRESSION`. O único fold rational é o `-` unário.
 
+## 2c. Onde o *linter* (não o `zpc`) é deliberadamente mais permissivo
+
+O `zpc` persegue paridade. O linter heurístico do zplint tem outro objetivo — não incomodar
+com código inofensivo. Onde os dois discordam de propósito, fica registrado aqui.
+
+| Caso | amxxpc / `zpc` | linter `zplint` | Por quê |
+|------|----------------|-----------------|---------|
+| `set_task(0, "x")` — literal `0` num parâmetro `Float:` | **Avisa 213.** `matchtag()` compara apenas tags; não existe exceção para zero em `matchtag`/`checktag`/`callfunction`. Untagged→tagged nunca coage (a coerção exige `formaltag == 0`). | `api_tag_int_arg` **não** avisa | O padrão de bits de `0` *é* `0.0`, então o código roda certo. Avisar aqui seria ruído em código correto. **É escolha do linter, não comportamento do compilador** — a doc antes afirmava o contrário e foi corrigida. |
+
 ## 3. Diferenças de saída binária (não são divergências semânticas)
 
 | # | Caso | Nota |

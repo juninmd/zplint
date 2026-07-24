@@ -621,7 +621,13 @@ Parsing notes learned while writing the generator (all cost real bugs):
 Rules built on the table:
 - `[rule: api_arity]` argument count outside `[min_args, max_args]`. Compile error 202/092.
 - `[rule: api_tag_int_arg]` int literal into a `Float:` parameter (warning 213); the cell is
-  bit-reinterpreted as a denormal (~1e-43). Literal `0` is exempt — its bit pattern *is* `0.0`.
+  bit-reinterpreted as a denormal (~1e-43). Literal `0` is exempt **by zplint's choice**, because
+  its bit pattern *is* `0.0`, so the code is harmless.
+  **The compiler does not agree**: `matchtag()` (`sc3.c`) compares tags only — there is no
+  literal-zero exemption anywhere in `matchtag`/`checktag`/`callfunction`, so `set_task(0, "x")`
+  really does warn 213 in amxxpc. This is a deliberate leniency to avoid flagging harmless code,
+  not a description of compiler behaviour. Verified while porting the tag system; see
+  `docs/DIVERGENCES.md`.
 - `[rule: api_tag_float_arg]` float literal into a cell parameter; `1.0` reads as 1065353216.
   **Confirmed true positive in the real corpus:** `zp50_parachute.sma:281` calls
   `velocity_by_aim(id, 1.0, aim)` where `speed` is an int cell.
