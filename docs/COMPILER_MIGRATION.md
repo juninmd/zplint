@@ -152,16 +152,19 @@ que existe é testado e está no repositório, não que a fase esteja fechada.
 | Fase | Crate(s) | Estado | Testes |
 |------|----------|--------|--------|
 | A — Lexer + Preprocessador | `zpc-lex` | ✅ scanner + preproc completos | 97 |
-| B — Parser + símbolos | `zpc-parse`, `zpc-sema` | 🟡 tabela de símbolos pronta; parser em construção | 17 |
-| C — Semântica / tags | `zpc-sema` | 🟡 em construção (tags, constant folding) | — |
-| D — Codegen | `zpc-codegen` | ⬜ não iniciado | — |
-| E — Assembler + peephole | `zpc-asm` | 🟡 138 opcodes + disassembler; assembler falta | 16 |
+| B — Parser + símbolos | `zpc-parse` | ✅ decl + stmt + expr; fixture parseia com 0 diagnósticos | 110 |
+| C — Semântica / tags | `zpc-sema` | ✅ símbolos + tags + constant folding | 103 |
+| D — Codegen | `zpc-codegen` | 🟡 em construção | — |
+| E — Assembler + peephole | `zpc-asm` | 🟡 opcodes + disassembler prontos; assembler em construção | 16 |
 | F — Container `.amxx` | `zpc-amxx` | ✅ read/write + header AMX | 22 |
-| G — Integração | `zplint` | 🟡 `zplint disasm` funcional | 104 |
-| — | `zpc-diag` | ✅ 136 diagnósticos gerados do `sc5-in.scp` | 6 |
+| G — Integração | `zplint` | 🟡 `zplint disasm` funcional; `compile` falta | 104 |
+| — | `zpc-diag` / `zpc-ast` | ✅ 136 diagnósticos + AST completa | 12 |
 
-**Falta o grosso**: parser de statements/expressões, sistema de tags, constant folding,
-codegen e assembler. A Fase C é onde mora a "validação 100%" e é a maior das restantes.
+**Total: 464 testes, clippy limpo.**
+
+**Falta**: codegen (Fase D), assembler (Fase E) e o driver que amarra tudo em
+`zplint compile`. As fases A-C — que é onde mora a "validação 100%" — estão construídas
+e testadas, mas **não validadas contra o oráculo** (ver bloqueadores).
 
 ### Infraestrutura de validação já de pé
 - `scripts/difftest.mjs` — oráculo diferencial (precisa de `amxxpc.exe`).
@@ -173,3 +176,4 @@ codegen e assembler. A Fase C é onde mora a "validação 100%" e é a maior das
 1. **Sem `amxxpc.exe`** → o oráculo não roda. É o item de maior risco do projeto:
    sem ele, "paridade" é afirmação não verificada.
 2. **Licença do zplint indefinida** → ver `docs/LICENSING.md` §5.
+
