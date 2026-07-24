@@ -527,6 +527,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
     }
 
     crate::detectors::run(&raw_clean, &lines_clean, config, &mut issues);
+    crate::api_check::run(&raw_clean, &lines_clean, config, &mut issues);
 
     if config.zp_items_register_check {
         for caps in RE_ITEMS_REG.captures_iter(&raw_clean) {
@@ -582,6 +583,8 @@ pub(crate) fn enclosing_function_name(lines: &[&str], lineno: usize, function_na
 
 /// Rules that flag style/perf smells rather than crash risks (do not fail CI).
 static WARNING_RULES: &[&str] = &[
+    // api_check.rs: still compiles, unlike the other api_* rules
+    "api_deprecated",
     "touch_spam", "pev_oldbuttons", "get_user_origin", "library_exists_hotpath",
     "hardcoded_maxplayers", "client_cmd_spk", "buffer_size",
     // detectors.rs warnings

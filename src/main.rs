@@ -1,3 +1,5 @@
+mod api;
+mod api_check;
 mod config;
 mod detectors;
 mod discover;

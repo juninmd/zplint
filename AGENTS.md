@@ -39,6 +39,19 @@ Use these primary references when adding or validating Pawn/AMXX lint rules:
 
 Before adding a detector, confirm it against at least one primary AMXX reference and one real `.sma` fixture/pattern from `D:\Solutions\pessoal\zplague-addons` when possible.
 
+## Regenerating the API table
+
+`src/api.rs` is generated, never hand-edited. To refresh it against upstream AMX Mod X:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/alliedmodders/amxmodx
+cd amxmodx && git sparse-checkout set plugins
+node scripts/genapi.mjs <clone>/plugins/include src/api.rs
+cargo test          # includes a table-sorted invariant check
+```
+
+Node is required only for this regeneration step; building and running zplint never needs it.
+
 ## Project Structure
 
 | Path | Purpose |
@@ -47,6 +60,9 @@ Before adding a detector, confirm it against at least one primary AMXX reference
 | `src/config.rs` | TOML config (serde); `rules.disable` list for detectors.rs rules |
 | `src/engine.rs` | Lint engine (original 37 detectors), comment stripping, severity table |
 | `src/detectors.rs` | Research-driven detectors (53 rules, see docs/KNOWLEDGE.md) |
+| `src/api.rs` | GENERATED signature table: all 1631 symbols from the 66 bundled includes |
+| `src/api_check.rs` | Whole-API rules driven by that table (arity, tags, includes, typos) |
+| `scripts/genapi.mjs` | Dev-time generator for `src/api.rs` (not needed to build or run zplint) |
 | `src/rules.rs` | Helper functions (has_guard, enclosing_body, squash) |
 | `src/output.rs` | Biome-style colored output (termcolor), prints rule ids |
 | `src/fix.rs` | Auto-fix for safe patterns |

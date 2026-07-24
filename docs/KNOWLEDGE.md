@@ -593,7 +593,70 @@ real-corpus + official-bundled-plugin regression case (`plmenu.sma`)
 
 ---
 
-## 8. Multilingual (%L) notes
+## 8. Full API signature coverage (`src/api.rs`, `src/api_check.rs`)
+
+Every rule above targets a hand-picked native. Section 8 covers the API **exhaustively**
+instead: `src/api.rs` is generated from the 66 bundled `plugins/include/*.inc` files of
+`alliedmodders/amxmodx` — the same declarations that back https://www.amxmodx.org/api —
+giving 1631 symbols (1209 natives, 354 stocks, 68 forwards), of which 1467 are callable
+with at least one required argument. A reachability test (call every one of those 1467 with
+zero arguments; every one must raise `api_arity`) confirms 1467/1467 resolve, i.e. **100%
+of the documented API surface is checked**, not a curated subset.
+
+Regenerate with `node scripts/genapi.mjs <path-to>/plugins/include src/api.rs`. The script
+is a dev-time tool only — the shipped binary stays pure Rust with the table compiled in.
+
+Parsing notes learned while writing the generator (all cost real bugs):
+- A variadic tail is written `...` **or tagged** (`any:...`, `Float:...`). Treating `any:...`
+  as an ordinary parameter caps `max_args` and mass-false-positives every format-style native
+  (`client_print`, `format`, `engfunc`, `set_pev`, `ExecuteHamB`).
+- Default values make a parameter optional, so `min_args` != `params.len()`; the `=` must be
+  found at paren/bracket/brace depth 0 (default array values like `= {0.0, 0.0}` contain commas).
+- `stock Float:xs__TaskInterval = 0.0;` is a global variable, not a function — a `stock` line
+  is only a declaration when a `(` precedes any top-level `=`.
+- By-reference parameters (`&ping`, `&Float:out`) exist on 100 parameters; a literal there is
+  always a compile error.
+
+Rules built on the table:
+- `[rule: api_arity]` argument count outside `[min_args, max_args]`. Compile error 202/092.
+- `[rule: api_tag_int_arg]` int literal into a `Float:` parameter (warning 213); the cell is
+  bit-reinterpreted as a denormal (~1e-43). Literal `0` is exempt — its bit pattern *is* `0.0`.
+- `[rule: api_tag_float_arg]` float literal into a cell parameter; `1.0` reads as 1065353216.
+  **Confirmed true positive in the real corpus:** `zp50_parachute.sma:281` calls
+  `velocity_by_aim(id, 1.0, aim)` where `speed` is an int cell.
+- `[rule: api_byref_literal]` literal passed to an `&` parameter — it cannot receive the output.
+- `[rule: api_deprecated]` (warning) native carrying a `#pragma deprecated`, reported with the
+  documented replacement (13 in the table, e.g. `geoip_country` → `geoip_country_ex`).
+- `[rule: api_missing_include]` native used without the `#include` that declares it, resolved
+  through a generated transitive include closure (`amxmodx` alone pulls in 26 includes, which
+  is why a naive check would be wrong).
+- `[rule: api_unknown_native]` unknown symbol within edit distance 1 **or one transposition**
+  of a real native (`get_user_nmae` → `get_user_name`); transposition matters because it is the
+  most common typo shape and is distance 2 under plain Levenshtein.
+
+Precision guards — these are what keep the official-plugin baseline at 0 errors:
+- Only calls at brace depth > 0 count, which excludes declarations and definitions.
+- Plugin-local `#define`s and top-level definitions shadow the API and suppress all checks for
+  that name (legacy plugins routinely wrap or redefine natives).
+- If the file `#include`s anything not bundled with AMX Mod X (`<zombieplague>`, …), the
+  include-sensitive rules (`api_missing_include`, `api_unknown_native`) back off entirely,
+  because a third-party include may declare anything.
+- `api_tag_*` stays quiet when a more specific hand-written rule (`set_task_int_interval`,
+  `pev_float_int`, `fun_float_int`, …) already fired on the same line, so one defect is
+  reported once. Those rules are kept, not replaced: they cover cases the table cannot, such
+  as `set_pev`'s third argument, whose type depends on the `pev_*` member selector.
+
+Validation: 0 errors and 0 `api_*` findings across the 74 official `alliedmodders/amxmodx`
+plugins; 4 findings across the 542-file real-world corpus, all true positives. Arity errors are
+near-absent in both corpora *by construction* — shipped `.sma` files compiled, and wrong arity
+is a hard compile error. These rules earn their keep while code is being written, which is
+also why they are errors rather than warnings.
+Sources: https://www.amxmodx.org/api ·
+https://github.com/alliedmodders/amxmodx/tree/master/plugins/include
+
+---
+
+## 9. Multilingual (%L) notes
 
 Each %L consumes target + key. LANG_PLAYER is for broadcasts (per-player language);
 LANG_SERVER on a broadcast forces server language on everyone; missing target shifts all
