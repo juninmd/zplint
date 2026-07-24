@@ -6,3 +6,4 @@ description = "Pawn assembly to AMX bytecode assembler"
 
 [dependencies]
 zpc-diag = { path = "../zpc-diag" }
+zpc-amxx = { path = "../zpc-amxx" }
