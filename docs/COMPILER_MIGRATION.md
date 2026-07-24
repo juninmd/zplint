@@ -1,7 +1,12 @@
 # zpc — Reimplementação do compilador AMXX Pawn em Rust
 
 > Plano de migração do `amxxpc` (C, ~23k LOC, parado há ~5 anos) para um compilador
-> Rust moderno embutido no zplint. Status: **PLANO** (nada implementado ainda).
+> Rust moderno embutido no zplint.
+>
+> **Status: EM ANDAMENTO.** Ver a tabela de progresso na §8. O oráculo diferencial
+> ainda **não roda** (não há `amxxpc.exe` nesta máquina), então nenhuma paridade está
+> provada — só os testes próprios passam. Divergências deliberadas e correções de
+> premissa ficam em `docs/DIVERGENCES.md`.
 
 ## 0. Objetivo e não-objetivos
 
@@ -136,3 +141,35 @@ bytecode — bom ponto de corte se o escopo precisar encolher.
 2. Levantar o harness diferencial + `amxxpc.exe` de referência + baseline do corpus.
 3. Scaffold do workspace `zpc`.
 4. Iniciar Fase A (lexer).
+
+---
+
+## 8. Progresso real
+
+Contagem de testes verificada com `cargo test --workspace`. "Parcial" significa que o
+que existe é testado e está no repositório, não que a fase esteja fechada.
+
+| Fase | Crate(s) | Estado | Testes |
+|------|----------|--------|--------|
+| A — Lexer + Preprocessador | `zpc-lex` | ✅ scanner + preproc completos | 97 |
+| B — Parser + símbolos | `zpc-parse`, `zpc-sema` | 🟡 tabela de símbolos pronta; parser em construção | 17 |
+| C — Semântica / tags | `zpc-sema` | 🟡 em construção (tags, constant folding) | — |
+| D — Codegen | `zpc-codegen` | ⬜ não iniciado | — |
+| E — Assembler + peephole | `zpc-asm` | 🟡 138 opcodes + disassembler; assembler falta | 16 |
+| F — Container `.amxx` | `zpc-amxx` | ✅ read/write + header AMX | 22 |
+| G — Integração | `zplint` | 🟡 `zplint disasm` funcional | 104 |
+| — | `zpc-diag` | ✅ 136 diagnósticos gerados do `sc5-in.scp` | 6 |
+
+**Falta o grosso**: parser de statements/expressões, sistema de tags, constant folding,
+codegen e assembler. A Fase C é onde mora a "validação 100%" e é a maior das restantes.
+
+### Infraestrutura de validação já de pé
+- `scripts/difftest.mjs` — oráculo diferencial (precisa de `amxxpc.exe`).
+- `crates/zpc-asm/src/disasm.rs` — disassembly normalizado (independente de layout),
+  que é a forma correta de comparar saída, já que bytes de `.amxx` divergem por zlib.
+- `crates/zpc/tests/fixtures/` — Pawn escrito à mão cobrindo as armadilhas conhecidas.
+
+### Bloqueadores
+1. **Sem `amxxpc.exe`** → o oráculo não roda. É o item de maior risco do projeto:
+   sem ele, "paridade" é afirmação não verificada.
+2. **Licença do zplint indefinida** → ver `docs/LICENSING.md` §5.
