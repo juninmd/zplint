@@ -6,5 +6,10 @@ description = "AST to Pawn assembly code generation"
 
 [dependencies]
 zpc-diag = { path = "../zpc-diag" }
+zpc-asm = { path = "../zpc-asm" }
 zpc-ast = { path = "../zpc-ast" }
 zpc-sema = { path = "../zpc-sema" }
+
+[dev-dependencies]
+zpc-lex = { path = "../zpc-lex" }
+zpc-parse = { path = "../zpc-parse" }
