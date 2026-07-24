@@ -1,0 +1,8 @@
+[package]
+name = "zpc-asm"
+version = "0.1.0"
+edition = "2024"
+description = "Pawn assembly to AMX bytecode assembler"
+
+[dependencies]
+zpc-diag = { path = "../zpc-diag" }

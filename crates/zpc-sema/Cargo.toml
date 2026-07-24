@@ -1,0 +1,9 @@
+[package]
+name = "zpc-sema"
+version = "0.1.0"
+edition = "2024"
+description = "Semantic analysis: symbols, tags, constant folding"
+
+[dependencies]
+zpc-diag = { path = "../zpc-diag" }
+zpc-ast = { path = "../zpc-ast" }

@@ -1,0 +1,10 @@
+[package]
+name = "zpc-parse"
+version = "0.1.0"
+edition = "2024"
+description = "Parser producing the zpc AST"
+
+[dependencies]
+zpc-diag = { path = "../zpc-diag" }
+zpc-lex = { path = "../zpc-lex" }
+zpc-ast = { path = "../zpc-ast" }

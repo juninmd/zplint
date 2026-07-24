@@ -1,0 +1,7 @@
+[package]
+name = "zpc-diag"
+version = "0.1.0"
+edition = "2024"
+description = "Diagnostics (codes, spans, severities) for the zpc Pawn compiler"
+
+[dependencies]

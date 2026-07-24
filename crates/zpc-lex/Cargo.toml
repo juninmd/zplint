@@ -1,0 +1,8 @@
+[package]
+name = "zpc-lex"
+version = "0.1.0"
+edition = "2024"
+description = "Lexer and preprocessor for the zpc Pawn compiler"
+
+[dependencies]
+zpc-diag = { path = "../zpc-diag" }

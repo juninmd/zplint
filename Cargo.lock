@@ -614,6 +614,78 @@ dependencies = [
 ]
 
 [[package]]
+name = "zpc"
+version = "0.1.0"
+dependencies = [
+ "zpc-amxx",
+ "zpc-asm",
+ "zpc-ast",
+ "zpc-codegen",
+ "zpc-diag",
+ "zpc-lex",
+ "zpc-parse",
+ "zpc-sema",
+]
+
+[[package]]
+name = "zpc-amxx"
+version = "0.1.0"
+dependencies = [
+ "zpc-diag",
+]
+
+[[package]]
+name = "zpc-asm"
+version = "0.1.0"
+dependencies = [
+ "zpc-diag",
+]
+
+[[package]]
+name = "zpc-ast"
+version = "0.1.0"
+dependencies = [
+ "zpc-diag",
+]
+
+[[package]]
+name = "zpc-codegen"
+version = "0.1.0"
+dependencies = [
+ "zpc-ast",
+ "zpc-diag",
+ "zpc-sema",
+]
+
+[[package]]
+name = "zpc-diag"
+version = "0.1.0"
+
+[[package]]
+name = "zpc-lex"
+version = "0.1.0"
+dependencies = [
+ "zpc-diag",
+]
+
+[[package]]
+name = "zpc-parse"
+version = "0.1.0"
+dependencies = [
+ "zpc-ast",
+ "zpc-diag",
+ "zpc-lex",
+]
+
+[[package]]
+name = "zpc-sema"
+version = "0.1.0"
+dependencies = [
+ "zpc-ast",
+ "zpc-diag",
+]
+
+[[package]]
 name = "zplint"
 version = "0.2.0"
 dependencies = [

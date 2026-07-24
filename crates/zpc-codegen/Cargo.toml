@@ -1,0 +1,10 @@
+[package]
+name = "zpc-codegen"
+version = "0.1.0"
+edition = "2024"
+description = "AST to Pawn assembly code generation"
+
+[dependencies]
+zpc-diag = { path = "../zpc-diag" }
+zpc-ast = { path = "../zpc-ast" }
+zpc-sema = { path = "../zpc-sema" }

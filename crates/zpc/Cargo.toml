@@ -1,0 +1,15 @@
+[package]
+name = "zpc"
+version = "0.1.0"
+edition = "2024"
+description = "Driver tying the zpc Pawn compiler phases together"
+
+[dependencies]
+zpc-diag = { path = "../zpc-diag" }
+zpc-lex = { path = "../zpc-lex" }
+zpc-ast = { path = "../zpc-ast" }
+zpc-parse = { path = "../zpc-parse" }
+zpc-sema = { path = "../zpc-sema" }
+zpc-codegen = { path = "../zpc-codegen" }
+zpc-asm = { path = "../zpc-asm" }
+zpc-amxx = { path = "../zpc-amxx" }
