@@ -39,8 +39,11 @@ new g_neg = -42
 new Float:g_rational = 1.5
 new Float:g_small = 0.001
 
-// Multi-line string continuation using the control character.
-new g_long[] = "first part ^
+// Multi-line continuation is a trailing BACKSLASH, hardcoded in readline()
+// (sc2.c: `if (*ptr=='\\')`). It is NOT the control character - using ^ here
+// would be a plain xor. Trailing whitespace before the \ is allowed, and the
+// continued line's leading indentation is stripped.
+new g_long[] = "first part \
 second part"
 
 // Range and rest tokens.

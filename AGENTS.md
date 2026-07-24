@@ -83,8 +83,10 @@ Node is required only for this regeneration step; building and running zplint ne
 7. Pawn parsing gotchas learned from the corpora: escape char is `^` unless
    `#pragma ctrlchar '\'`; `//*` is a line comment (not a block open); braceless
    single-statement function bodies exist; `if (..) message_begin(A) else
-   message_begin(B)` is one message, not nesting; multi-line strings continue with
-   a trailing `\`/`^`; literal-to-array assignment is legal when the literal fits
+   message_begin(B)` is one message, not nesting; multi-line continuation is a
+   trailing **backslash only** — hardcoded in `readline()` (`if (*ptr=='\\')`),
+   independent of `#pragma ctrlchar`, so a trailing `^` is just an xor;
+   literal-to-array assignment is legal when the literal fits
 
 ## Performance Goals
 
