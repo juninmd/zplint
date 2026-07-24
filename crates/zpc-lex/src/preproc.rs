@@ -56,7 +56,12 @@ pub const MAX_INCLUDE_DEPTH: usize = 32;
 pub const MAX_SUBST_STEPS: usize = 512;
 
 /// The escape character before any `#pragma ctrlchar`.
-pub const DEFAULT_CTRLCHAR: u8 = b'\\';
+///
+/// Pawn's default is `^`, NOT the backslash C programmers expect (`sc2.c` sets
+/// `sc_ctrlchar = CTRL_CHAR` with `#define CTRL_CHAR '^'`). This must agree with
+/// [`crate::scanner::DEFAULT_CTRL_CHAR`]: the driver hands this value to the
+/// scanner, so a disagreement silently breaks every `^` escape in every include.
+pub const DEFAULT_CTRLCHAR: u8 = crate::scanner::DEFAULT_CTRL_CHAR;
 
 // --- character classes (sc2.c: alpha/alphanum/ishex) ------------------------
 
@@ -2141,15 +2146,23 @@ mod tests {
 
     #[test]
     fn pragma_ctrlchar_changes_the_escape_character() {
-        let (out, d) = run("#pragma ctrlchar '^'\n");
-        assert_eq!(out.state.ctrlchar, b'^');
+        // The default is '^', so a backslash is an ordinary character and
+        // `#pragma ctrlchar '\'` switches the escape over to it. That is the form
+        // the bundled AMXX headers actually use.
+        let (out, d) = run("#pragma ctrlchar '\\'\n");
+        assert_eq!(out.state.ctrlchar, b'\\');
         assert!(codes(&d).is_empty());
-        // with '^' active, a backslash no longer escapes the closing quote
-        let (out, _) = run("#pragma ctrlchar '^'\n#define A 1\ns = \"A\\\";\n");
-        assert!(out.text.contains("\"A\\\""), "unexpected: {:?}", out.text);
-        // and an empty argument restores the default
-        let (out, _) = run("#pragma ctrlchar '^'\n#pragma ctrlchar\n");
+
+        // An empty argument restores the original (sc2.c: sc_ctrlchar_org).
+        let (out, _) = run("#pragma ctrlchar '\\'\n#pragma ctrlchar\n");
         assert_eq!(out.state.ctrlchar, DEFAULT_CTRLCHAR);
+
+        // Quirk reproduced faithfully: sc2.c reads the argument with lex(), which
+        // uses the CURRENT control character. Writing `#pragma ctrlchar '^'` while
+        // '^' is already active therefore reads `^'` as an escaped quote and yields
+        // '\'' (39), not '^'. amxxpc does the same.
+        let (out, _) = run("#pragma ctrlchar '^'\n");
+        assert_eq!(out.state.ctrlchar, b'\'');
     }
 
     #[test]

@@ -62,8 +62,13 @@ use flate2::write::ZlibEncoder;
 
 /// Container magic, `XXMA` on disk. Little-endian encoding of `0x414D5858`.
 pub mod amx_header;
+pub mod debug;
 
 pub use amx_header::AmxHeader;
+pub use debug::{
+    DebugAutomaton, DebugError, DebugFile, DebugInfo, DebugLine, DebugState, DebugSymbol, DebugTag,
+    SymDim, append_debug_chunk,
+};
 
 pub const MAGIC: u32 = 0x414D_5858;
 /// Container magic as it appears on disk, for byte-level assertions.

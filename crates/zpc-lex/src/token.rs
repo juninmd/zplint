@@ -264,6 +264,16 @@ mod tests {
         }
     }
 
+    /// The preprocessor hands its control character to the scanner, so the two
+    /// defaults must agree. When they disagreed (`\` vs `^`) every `^` escape in
+    /// every bundled include failed to lex, and nothing caught it until a real
+    /// plugin was compiled.
+    #[test]
+    fn the_preprocessor_and_scanner_agree_on_the_control_character() {
+        assert_eq!(crate::preproc::DEFAULT_CTRLCHAR, crate::scanner::DEFAULT_CTRL_CHAR);
+        assert_eq!(crate::scanner::DEFAULT_CTRL_CHAR, b'^');
+    }
+
     #[test]
     fn keyword_set_matches_the_compiler() {
         assert_eq!(TokenKind::keyword("public"), Some(TokenKind::Public));
