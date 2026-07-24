@@ -31,6 +31,8 @@ Diferenças que vêm de o `zpc` ter AST e passes separados, onde o original é s
 | 2.1 | Identificador indefinido dentro de `#if` | amxxpc emite erro 17; `zpc` trata como 0 em silêncio | No amxxpc o `#if` roda contra a tabela de símbolos completa (`const`/`enum` já visíveis). No `zpc` o preprocessador roda **antes** de qualquer análise semântica; reportar ali fabricaria "undefined symbol" em todo plugin real. Reavaliar quando/se o preproc ganhar acesso a constantes. |
 | 2.2 | Colunas dentro de linha expandida por macro | amxxpc não tem spans; `zpc` tem spans exatos, exceto coluna dentro de expansão | `LineMap` mapeia linha→(arquivo, linha original). Substituição destrói a correspondência de bytes. Diagnósticos do próprio preprocessador não são afetados (carregam span exato). |
 | 2.3 | `#line` | Parseado e validado, mas não renumera a saída | O `LineMap` já carrega as posições reais; renumerar seria redundante. |
+| 2.4 | Warning 208 (função com tag usada antes da definição) | amxxpc **reparseia o arquivo inteiro**; o `zpc` avisa na definição e segue | Conjunto aceita/rejeita é o mesmo (208 é warning). Mas a *tag* das chamadas feitas antes da definição só fica correta na segunda passada do upstream — checar tag nesses call sites fica explicitamente a cargo do chamador. |
+| 2.5 | Warnings 203/204 (símbolo não usado) | amxxpc emite no teardown de cada escopo; o `zpc` acumula e ordena por `(span, código)` | Ordem de saída passa a ser função da fonte, não da ordem de iteração de `HashMap`. Teste roda o mesmo escopo de 64 símbolos seis vezes e exige saída byte-idêntica. |
 
 ## 3. Diferenças de saída binária (não são divergências semânticas)
 
@@ -52,3 +54,6 @@ Não são divergências com o amxxpc — são casos em que **nós** estávamos e
 | "o enum `OP_*` está em `amx.h`" | Não está nesta árvore. A numeração autoritativa é o `opcodelist[]` do `sc6.c`. |
 | `AMX_HEADER` tem 60 bytes | 56, contando campo a campo do struct `PACKED` (`4+2+1+1+2+2 + 11×4`). |
 | escapes `^ddd` são octais (como `\ddd` em C) | São **decimais**: `"^65;"` é `"A"`. |
+| limite de nome de símbolo é 31 | **63** — o AMXX aumentou `sNAMEMAX` em relação ao Pawn original. |
+| `foo()` sem `foo` definido dá erro 17 | Dá **erro 4** ("function is not implemented"). O 17 é para referência que não é chamada. |
+| o enum `OP_*` tem aridade inferível pelo nome | Vem da função de emissão que cada linha do `opcodelist[]` referencia (`parm0`/`parm1`/`parm2`); `casetbl` é variável (`2+2n` células). |
