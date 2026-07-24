@@ -28,7 +28,12 @@
 //!   emitted; `Stmt::State` raises error 86.
 //! * **User-defined operators** (`operator+(Float:,Float:)`): `check_userop()` in
 //!   `sc3.c` rewrites almost every operator emission into a function call.
-//!   `FuncName::Operator` raises error 7.
+//!   `FuncName::Operator` raises error 7. [`zpc_sema::tags::Overloads`] already
+//!   implements the resolution, but it is keyed entirely on the *tags* of the
+//!   operands (`operator_symname()` builds the symbol name out of them), and no
+//!   tag ids reach codegen at all - see the `Tags` entry below. Dispatching
+//!   without them would have to guess which overload applies, and a wrong guess
+//!   silently calls the wrong function, so the error stands.
 //! * **Some `sc7.c` peephole sequences.** [`peephole::optimise`] ports most of
 //!   `sequences[]`; the rows it deliberately leaves out (the chained-relational
 //!   `xchg` family, the `;$lcl` declaration rows and the user-defined-operator
@@ -39,6 +44,13 @@
 //!   heap unbalanced on one path. The `decl_heap` counter is threaded through
 //!   [`emit::Generator::expression`] but not yet through `hier13()`.
 //! * **Block-local `enum`**: only file-scope enums are folded into constants.
+//! * **An array-returning *definition* whose shape cannot be inferred.**
+//!   `newfunc()` has no return-dimension syntax; `doreturn()` derives the shape
+//!   from the first `return <array>;` and re-parses the unit when the function
+//!   was already called (`sc_reparse=TRUE`, `sc1.c:5518`). The single pass here
+//!   infers it in the pre-pass from a `return` naming an unambiguously declared
+//!   array; when it cannot, `return` of an array raises error 46 rather than
+//!   compiling a `load.i` of the base address.
 //! * **Tags**: no tag ids are propagated, so `exit`/`sleep` always pass tag 0 and
 //!   no warning 213 is raised here. Tag checking is [`zpc_sema::tags`]' job.
 //!
