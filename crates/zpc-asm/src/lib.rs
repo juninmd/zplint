@@ -4,5 +4,5 @@
 pub mod disasm;
 pub mod opcode;
 
-pub use disasm::{DisasmError, Instruction, Style, disassemble, render};
+pub use disasm::{DisasmError, Instruction, Style, dangling_targets, disassemble, render};
 pub use opcode::{Opcode, Operands};

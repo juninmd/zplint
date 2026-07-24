@@ -216,6 +216,21 @@ fn label_map(instrs: &[Instruction]) -> Vec<i32> {
     labels
 }
 
+/// Jump targets that do not land on any instruction boundary.
+///
+/// A dangling target means the decode desynchronised, the segment bounds were
+/// wrong, or the operand is not really an address. Normalised output would render
+/// it as a label that is never defined, and the oracle would then be comparing two
+/// listings that only look alike - so callers should treat a non-empty result as a
+/// hard failure rather than a cosmetic issue.
+pub fn dangling_targets(instrs: &[Instruction]) -> Vec<i32> {
+    let valid: Vec<i32> = instrs.iter().map(|i| i.address as i32).collect();
+    label_map(instrs)
+        .into_iter()
+        .filter(|t| !valid.contains(t))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +337,19 @@ mod tests {
         let rb_tail = rb.lines().skip(1).collect::<Vec<_>>().join("\n");
         assert_eq!(ra.trim_end(), rb_tail.trim_end());
         assert!(ra.contains("jump L0"), "jump should be symbolic, got:\n{ra}");
+    }
+
+    #[test]
+    fn dangling_jump_targets_are_reported() {
+        // 999 is not the address of any instruction: normalised output would emit
+        // "jump L0" with no L0: line anywhere, which must not pass silently.
+        let d = disassemble(&asm(&[(Opcode::Jump, &[999]), (Opcode::Retn, &[])])).unwrap();
+        assert_eq!(dangling_targets(&d), vec![999]);
+
+        // a target that does land on an instruction is fine
+        let ok = disassemble(&asm(&[(Opcode::Jump, &[8]), (Opcode::Nop, &[]), (Opcode::Retn, &[])]))
+            .unwrap();
+        assert!(dangling_targets(&ok).is_empty());
     }
 
     #[test]

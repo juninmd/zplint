@@ -18,6 +18,8 @@ walkdir = "2"
 notify = { version = "8", features = ["macos_kqueue"] }
 anyhow = "1"
 rayon = "1"
+zpc-amxx = { path = "crates/zpc-amxx" }
+zpc-asm = { path = "crates/zpc-asm" }
 
 [profile.release]
 opt-level = 3

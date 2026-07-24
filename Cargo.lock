@@ -746,4 +746,6 @@ dependencies = [
  "termcolor",
  "toml",
  "walkdir",
+ "zpc-amxx",
+ "zpc-asm",
 ]

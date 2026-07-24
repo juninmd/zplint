@@ -2,6 +2,7 @@ mod api;
 mod api_check;
 mod config;
 mod detectors;
+mod disasm_cmd;
 mod discover;
 mod engine;
 mod fix;
@@ -35,6 +36,14 @@ enum Command {
     Fix {
         files: Vec<PathBuf>,
     },
+    /// Disassemble a compiled .amxx (or raw .amx) plugin
+    Disasm {
+        file: PathBuf,
+        /// Drop addresses and label jump targets, so output is comparable
+        /// between builds that differ only in code layout
+        #[arg(long)]
+        normalised: bool,
+    },
 }
 
 fn main() {
@@ -51,6 +60,9 @@ fn main() {
         }
         Some(Command::Lint { files }) => {
             run_lint(&root, &cfg, files);
+        }
+        Some(Command::Disasm { file, normalised }) => {
+            std::process::exit(disasm_cmd::run(&file, normalised));
         }
         None => {
             run_lint(&root, &cfg, cli.files);
