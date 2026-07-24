@@ -90,7 +90,37 @@ function findTopLevelEq(s) {
 
 const funcs = new Map(); // name -> record
 const includes = new Map(); // include name -> Set of directly included names
+const consts = new Map(); // constant name -> enum tag ("" for #define / anonymous enum)
 const files = fs.readdirSync(INC).filter(f => f.endsWith('.inc')).sort();
+
+// Extract `#define NAME value` object-like macros (skip function-like `#define f(%1)`)
+// and every enum member, tagging members with their enum's tag when it has one.
+function extractConstants(src) {
+  for (const dm of src.matchAll(/^\s*#define\s+([A-Za-z_]\w*)([^\S\r\n]*)(.*)$/gm)) {
+    const [, name, gap, rest] = dm;
+    if (gap === '' && rest.startsWith('(')) continue; // function-like macro
+    if (rest.trim() === '') continue;                 // bare flag, not a value constant
+    if (!consts.has(name)) consts.set(name, '');
+  }
+  // enum [_:|Tag:|Tag] [(op)] { members }
+  const re = /\benum\s+(?:([A-Za-z_]\w*)\s*:?\s*)?(?:\([^)]*\)\s*)?\{([^}]*)\}/g;
+  for (const em of src.matchAll(re)) {
+    let tag = em[1] ?? '';
+    if (tag === '_') tag = '';
+    for (const raw of em[2].split(',')) {
+      const mm = raw.trim().match(/^([A-Za-z_]\w*)/);
+      if (!mm) continue;
+      const name = mm[1];
+      // Members with array subscripts are struct field offsets, not value constants,
+      // but still real names - keep them untagged so typo detection recognises them.
+      const isField = /^[A-Za-z_]\w*\s*\[/.test(raw.trim());
+      const prev = consts.get(name);
+      if (prev === undefined || (prev === '' && tag !== '' && !isField)) {
+        consts.set(name, isField ? '' : tag);
+      }
+    }
+  }
+}
 
 for (const file of files) {
   const incName = path.basename(file, '.inc');
@@ -102,6 +132,7 @@ for (const file of files) {
     direct.add(im[1].replace(/\.inc$/, '').trim());
   }
   includes.set(incName, direct);
+  extractConstants(src);
   const lines = src.split(/\r?\n/);
   const rawLines = rawSrc.split(/\r?\n/);
 
@@ -243,6 +274,35 @@ pub fn include_closure(name: &str) -> Option<&'static [&'static str]> {
 pub fn lookup(name: &str) -> Option<&'static ApiFunc> {
     API.binary_search_by(|f| f.name.cmp(name)).ok().map(|i| &API[i])
 }
+
+/// Every named constant the bundled includes define: object-like \`#define\`s and enum
+/// members. The second field is the enum tag the member belongs to (\`""\` for a
+/// \`#define\` or an anonymous/untagged enum), used to catch a constant from the wrong
+/// enum being passed to a tagged parameter. Sorted by name for binary search.
+pub static CONSTANTS: &[(&str, &str)] = &[
+__CONSTANTS__
+];
+
+/// The enum tag \`name\` belongs to, or \`None\` if it is not a bundled constant.
+/// Returns \`Some("")\` for constants with no enum tag.
+pub fn constant_tag(name: &str) -> Option<&'static str> {
+    CONSTANTS
+        .binary_search_by(|(n, _)| (*n).cmp(name))
+        .ok()
+        .map(|i| CONSTANTS[i].1)
+}
+
+/// Tags that name an enumeration with at least two members, i.e. a tag whose valid
+/// values are a known finite set of constants. A parameter carrying one of these tags
+/// can be checked against \`CONSTANTS\`.
+pub static ENUM_TAGS: &[&str] = &[
+__ENUM_TAGS__
+];
+
+/// Whether \`tag\` is a checkable enumeration tag (see [\`ENUM_TAGS\`]).
+pub fn is_enum_tag(tag: &str) -> bool {
+    ENUM_TAGS.binary_search(&tag).is_ok()
+}
 `;
 
 // Transitive include closure (cycle-safe).
@@ -260,8 +320,23 @@ const closureRows = [...includes.keys()].sort().map(n => {
 }).join('\n');
 rs = rs.replace('__CLOSURE__', closureRows);
 
+// Constants table (sorted by name).
+const constRows = [...consts.entries()]
+  .sort((a, b) => a[0] < b[0] ? -1 : 1)
+  .map(([name, tag]) => `    ("${name}", "${tag}"),`)
+  .join('\n');
+rs = rs.replace('__CONSTANTS__', constRows);
+
+// Enum tags: any tag carried by >=2 member constants.
+const tagCounts = new Map();
+for (const tag of consts.values()) {
+  if (tag) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+}
+const enumTags = [...tagCounts.entries()].filter(([, c]) => c >= 2).map(([t]) => t).sort();
+rs = rs.replace('__ENUM_TAGS__', enumTags.map(t => `    "${t}",`).join('\n'));
+
 fs.writeFileSync(OUT, rs);
 
 const byKind = k => all.filter(f => f.kind === k).length;
 console.log(`includes=${files.length} funcs=${all.length} native=${byKind('native')} stock=${byKind('stock')} forward=${byKind('forward')} deprecated=${all.filter(f => f.deprecated).length}`);
-console.log(`variadic=${all.filter(f => f.variadic).length}`);
+console.log(`variadic=${all.filter(f => f.variadic).length} constants=${consts.size} enum_tags=${enumTags.length}`);

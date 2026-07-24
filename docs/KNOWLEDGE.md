@@ -598,7 +598,8 @@ real-corpus + official-bundled-plugin regression case (`plmenu.sma`)
 Every rule above targets a hand-picked native. Section 8 covers the API **exhaustively**
 instead: `src/api.rs` is generated from the 66 bundled `plugins/include/*.inc` files of
 `alliedmodders/amxmodx` — the same declarations that back https://www.amxmodx.org/api —
-giving 1631 symbols (1209 natives, 354 stocks, 68 forwards), of which 1467 are callable
+giving 1631 symbols (1209 natives, 354 stocks, 68 forwards) plus 3194 named constants
+(`#define`s + enum members, 57 of them under a checkable enum tag). 1467 functions are callable
 with at least one required argument. A reachability test (call every one of those 1467 with
 zero arguments; every one must raise `api_arity`) confirms 1467/1467 resolve, i.e. **100%
 of the documented API surface is checked**, not a curated subset.
@@ -634,6 +635,21 @@ Rules built on the table:
   of a real native (`get_user_nmae` → `get_user_name`); transposition matters because it is the
   most common typo shape and is distance 2 under plain Levenshtein.
 
+Constant-level rules (source also gives every `#define` and enum member — 3194 constants,
+57 of them grouped under a checkable enum tag):
+- `[rule: api_forward_signature]` a `public` implementing a known forward that declares MORE
+  parameters than the forward passes; the surplus params read uninitialised stack. AMXX allows
+  a public to declare *fewer* params (it just does not receive them), so only the "more" case
+  is a bug. Uses the 68 forwards already in the table.
+- `[rule: api_enum_constant]` a named constant from the wrong enumeration passed to a tagged
+  parameter — e.g. a `CsTeams:` constant where `cs_set_user_armor` wants `CsArmorType:`.
+  Compiler warning 213 (tag mismatch); only fires on a real constant of a *different* known
+  enum, never on variables or untagged values.
+- `[rule: api_unknown_const]` a constant-shaped identifier that is one edit (or one transposition)
+  away from a real constant **sharing its prefix family** (`CSW_`, `pev_`, `HAM_`, `PLUGIN_`, …),
+  e.g. `PLUGIN_CONTNIUE` → `PLUGIN_CONTINUE`. The prefix requirement keeps third-party constants
+  from being mistaken for typos.
+
 Precision guards — these are what keep the official-plugin baseline at 0 errors:
 - Only calls at brace depth > 0 count, which excludes declarations and definitions.
 - Plugin-local `#define`s and top-level definitions shadow the API and suppress all checks for
@@ -645,6 +661,19 @@ Precision guards — these are what keep the official-plugin baseline at 0 error
   `pev_float_int`, `fun_float_int`, …) already fired on the same line, so one defect is
   reported once. Those rules are kept, not replaced: they cover cases the table cannot, such
   as `set_pev`'s third argument, whose type depends on the `pev_*` member selector.
+
+The constant/enum-tag rules (`api_forward_signature`, `api_enum_constant`, `api_unknown_const`)
+are deliberately conservative: 0 findings on both the official plugins and the real corpus,
+because shipped `.sma` files compiled — a constant typo or wrong-enum arg is a hard compiler
+error/warning that would never survive to a released plugin. Like the arity rules they earn
+their keep while code is being *written*; each has a fixture proving it fires
+(see `src/api_check.rs` tests).
+
+Reality check on "100% validation": full guarantee (every plugin zplint passes compiles, and
+vice versa) is unreachable for a heuristic linter — it is the compiler's job (complete parse,
+tag system, macro expansion, constant folding, cross-file symbol resolution). What zplint
+guarantees is 100% *coverage of the documented API surface* (every native/stock/forward and
+every named constant is known and checkable), plus the semantic rules in the other sections.
 
 Validation: 0 errors and 0 `api_*` findings across the 74 official `alliedmodders/amxmodx`
 plugins; 4 findings across the 542-file real-world corpus, all true positives. Arity errors are

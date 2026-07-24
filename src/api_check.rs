@@ -56,6 +56,8 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
     // `#include` set: only usable when every include is one we know about.
     let (provided, all_includes_known) = included_set(lines);
 
+    check_forward_signatures(&sanitized, config, issues);
+
     for call in &calls {
         let Some(f) = api::lookup(&call.name) else {
             if all_includes_known
@@ -76,6 +78,7 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
 
         check_arity(call, f, config, issues);
         check_args(call, f, config, issues);
+        check_const_args(call, f, &local, all_includes_known, config, issues);
 
         if let Some(rep) = f.deprecated
             && config.enabled("api_deprecated")
@@ -194,6 +197,125 @@ fn check_args(call: &Call, f: &ApiFunc, config: &RulesConfig, issues: &mut Vec<L
     }
 }
 
+/// A bare identifier used as a call argument (not a number, string, expression or cast).
+fn bare_ident(a: &str) -> Option<&str> {
+    let a = a.trim();
+    if a.len() >= 3
+        && a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && a.as_bytes()[0].is_ascii_alphabetic()
+    {
+        Some(a)
+    } else {
+        None
+    }
+}
+
+/// Checks that use the generated constant table: a constant from the wrong enum
+/// passed to a tagged parameter, and constant-name typos.
+fn check_const_args(
+    call: &Call,
+    f: &ApiFunc,
+    local: &HashSet<String>,
+    all_includes_known: bool,
+    config: &RulesConfig,
+    issues: &mut Vec<LintIssue>,
+) {
+    for (i, arg) in call.args.iter().enumerate() {
+        let Some(p) = f.params.get(i) else { break };
+        let Some(id) = bare_ident(arg) else { continue };
+        if local.contains(id) {
+            continue; // plugin-local symbol shadows any constant of the same name
+        }
+        let tag = api::constant_tag(id);
+
+        // Wrong enum: parameter wants one enumeration, the constant belongs to another.
+        if config.enabled("api_enum_constant")
+            && api::is_enum_tag(p.tag)
+            && let Some(ct) = tag
+            && !ct.is_empty()
+            && ct != p.tag
+        {
+            issues.push(iss(
+                call.lineno,
+                format!(
+                    "{}() argument {} expects a {}: value, but {} is a {}: constant",
+                    f.name,
+                    i + 1,
+                    p.tag,
+                    id,
+                    ct
+                ),
+                "api_enum_constant",
+                false,
+            ));
+            continue;
+        }
+
+        // Typo: a constant-shaped name that is not any known constant, function or
+        // local symbol, but is one edit away from a real constant.
+        if all_includes_known
+            && config.enabled("api_unknown_const")
+            && tag.is_none()
+            && id.len() >= 5
+            && (id.contains('_') || id.bytes().all(|b| !b.is_ascii_lowercase()))
+            && api::lookup(id).is_none()
+            && let Some(sug) = near_miss_const(id)
+        {
+            issues.push(iss(
+                call.lineno,
+                format!("'{}' is not a known constant - did you mean '{}'?", id, sug),
+                "api_unknown_const",
+                false,
+            ));
+        }
+    }
+}
+
+/// A public function implementing a known forward must not declare more parameters
+/// than the forward passes; the extra ones read uninitialised stack.
+fn check_forward_signatures(sanitized: &[String], config: &RulesConfig, issues: &mut Vec<LintIssue>) {
+    if !config.enabled("api_forward_signature") {
+        return;
+    }
+    let mut depth = 0i32;
+    for (n, san) in sanitized.iter().enumerate() {
+        if depth == 0
+            && let Some(rest) = san.trim_start().strip_prefix("public ")
+        {
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if let Some(f) = api::lookup(&name)
+                && f.kind == Kind::Forward
+                && f.max_args != u8::MAX
+            {
+                let trimmed = rest.trim_start();
+                let after = trimmed[name.len()..].trim_start();
+                if after.starts_with('(') {
+                    let open = san.len() - after.len();
+                    let (params, truncated) = read_args(sanitized, n, open);
+                    if !truncated && params.len() > f.params.len() {
+                        issues.push(iss(
+                            n + 1,
+                            format!(
+                                "public {}() declares {} parameter(s), but the forward passes only {}",
+                                f.name,
+                                params.len(),
+                                f.params.len()
+                            ),
+                            "api_forward_signature",
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
+        depth += san.matches('{').count() as i32 - san.matches('}').count() as i32;
+    }
+}
+
 /// Names defined by the plugin itself: top-level function definitions/declarations
 /// and `#define`d macros. Calls to these must never be matched against the API,
 /// because the plugin's own version shadows it.
@@ -280,6 +402,21 @@ fn near_miss(name: &str) -> Option<&'static str> {
         .iter()
         .find(|f| f.kind != Kind::Forward && (edit_distance_1(name, f.name) || transposed(name, f.name)))
         .map(|f| f.name)
+}
+
+/// Closest constant name within edit distance 1 or one transposition. To keep false
+/// positives near zero we only consider a real constant that shares `name`'s prefix up
+/// to the first `_` (`CSW_`, `pev_`, `HAM_`, ...); an unrelated near-collision is far
+/// more likely to be a genuine third-party symbol than a typo of this constant.
+fn near_miss_const(name: &str) -> Option<&'static str> {
+    let prefix = name.split_once('_').map(|(p, _)| p);
+    api::CONSTANTS
+        .iter()
+        .find(|(c, _)| {
+            prefix == c.split_once('_').map(|(p, _)| p)
+                && (edit_distance_1(name, c) || transposed(name, c))
+        })
+        .map(|(c, _)| *c)
 }
 
 /// True when `a` becomes `b` by swapping one pair of adjacent characters
@@ -488,10 +625,59 @@ mod tests {
     }
 
     #[test]
+    fn forward_with_extra_params_is_flagged() {
+        // forward client_disconnected(id, bool:drop, message[], maxlen) - 4 params
+        let bad = "#include <amxmodx>\npublic client_disconnected(id, bool:drop, msg[], len, extra)\n{\n\tserver_print(\"%d\", extra)\n}\n";
+        assert!(lint(bad).contains(&"api_forward_signature"));
+        // fewer or equal params is legal (AMXX lets a public omit trailing forward args)
+        let ok = "#include <amxmodx>\npublic client_disconnected(id, bool:drop)\n{\n}\n";
+        assert!(!lint(ok).contains(&"api_forward_signature"));
+        let exact = "#include <amxmodx>\npublic client_disconnected(id, bool:drop, msg[], len)\n{\n}\n";
+        assert!(!lint(exact).contains(&"api_forward_signature"));
+    }
+
+    #[test]
+    fn wrong_enum_constant_is_flagged() {
+        // cs_set_user_armor(index, armorvalue, CsArmorType:type) fed a CsTeams constant
+        let bad = body("#include <cstrike>", "\tcs_set_user_armor(1, 100, CS_TEAM_T)");
+        assert!(lint(&bad).contains(&"api_enum_constant"));
+        let ok = body("#include <cstrike>", "\tcs_set_user_armor(1, 100, CS_ARMOR_KEVLAR)");
+        assert!(!lint(&ok).contains(&"api_enum_constant"));
+    }
+
+    #[test]
+    fn constant_typo_is_flagged_but_unknown_constant_is_not() {
+        let typo = body("#include <amxmodx>", "\tset_task(1.0, \"x\", 0, \"\", 0, PLUGIN_CONTNIUE)");
+        assert!(lint(&typo).contains(&"api_unknown_const"));
+        // a real constant must never be flagged
+        let ok = body("#include <amxmodx>", "\tset_task(1.0, \"x\", 0, \"\", 0, SetTask_Repeat)");
+        assert!(!lint(&ok).contains(&"api_unknown_const"));
+        // a third-party-looking constant with no near neighbour is left alone
+        let unknown = body("#include <amxmodx>", "\tset_task(1.0, \"x\", 0, \"\", 0, ZP_TEAM_ZOMBIE)");
+        assert!(!lint(&unknown).contains(&"api_unknown_const"));
+    }
+
+    #[test]
+    fn near_miss_const_requires_shared_prefix() {
+        assert_eq!(near_miss_const("PLUGIN_CONTNIUE"), Some("PLUGIN_CONTINUE"));
+        // same edit distance but different prefix family - not a suggestion
+        assert!(near_miss_const("XYZ_ABCDEF").is_none());
+    }
+
+    #[test]
     fn api_table_is_sorted_and_lookups_work() {
         assert!(api::API.windows(2).all(|w| w[0].name <= w[1].name));
         assert!(api::lookup("get_user_name").is_some());
         assert!(api::lookup("definitely_not_a_native").is_none());
+    }
+
+    #[test]
+    fn constant_tables_are_sorted() {
+        assert!(api::CONSTANTS.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert!(api::ENUM_TAGS.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(api::constant_tag("CS_ARMOR_KEVLAR"), Some("CsArmorType"));
+        assert!(api::is_enum_tag("CsArmorType"));
+        assert!(!api::is_enum_tag("Float"));
     }
 }
 

@@ -60,8 +60,8 @@ Node is required only for this regeneration step; building and running zplint ne
 | `src/config.rs` | TOML config (serde); `rules.disable` list for detectors.rs rules |
 | `src/engine.rs` | Lint engine (original 37 detectors), comment stripping, severity table |
 | `src/detectors.rs` | Research-driven detectors (53 rules, see docs/KNOWLEDGE.md) |
-| `src/api.rs` | GENERATED signature table: all 1631 symbols from the 66 bundled includes |
-| `src/api_check.rs` | Whole-API rules driven by that table (arity, tags, includes, typos) |
+| `src/api.rs` | GENERATED: 1631 signatures + 3194 constants from the 66 bundled includes |
+| `src/api_check.rs` | Whole-API rules (arity, tags, includes, typos, forwards, enum constants) |
 | `scripts/genapi.mjs` | Dev-time generator for `src/api.rs` (not needed to build or run zplint) |
 | `src/rules.rs` | Helper functions (has_guard, enclosing_body, squash) |
 | `src/output.rs` | Biome-style colored output (termcolor), prints rule ids |
