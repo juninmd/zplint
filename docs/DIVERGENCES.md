@@ -57,3 +57,4 @@ Não são divergências com o amxxpc — são casos em que **nós** estávamos e
 | limite de nome de símbolo é 31 | **63** — o AMXX aumentou `sNAMEMAX` em relação ao Pawn original. |
 | `foo()` sem `foo` definido dá erro 17 | Dá **erro 4** ("function is not implemented"). O 17 é para referência que não é chamada. |
 | o enum `OP_*` tem aridade inferível pelo nome | Vem da função de emissão que cada linha do `opcodelist[]` referencia (`parm0`/`parm1`/`parm2`); `casetbl` é variável (`2+2n` células). |
+| função retorna array como `Float:make()[3]` (afirmado na doc da AST) | **Errado.** `newfunc()` (definição) vai direto para `if (!matchtoken('('))` — não tem loop de dims. Só `funcstub()` (native/forward) tem `while (matchtoken('['))`, e **antes** do nome: `native Float:[3] make_vec();`. Logo `return_dims` só é populado para native/forward. |
