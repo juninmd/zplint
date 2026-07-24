@@ -6,3 +6,4 @@ description = ".amxx container writer (format reimplemented from spec)"
 
 [dependencies]
 zpc-diag = { path = "../zpc-diag" }
+flate2 = "1"

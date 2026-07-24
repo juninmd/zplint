@@ -121,10 +121,10 @@ fn fill(template: &str, args: &[&str]) -> String {
             3
         } else if after.starts_with("%s") || after.starts_with("%d") {
             2
-        } else if after.starts_with("%%") {
+        } else if let Some(tail) = after.strip_prefix("%%") {
             // Escaped percent: emit one, consume both.
             out.push('%');
-            rest = &after[2..];
+            rest = tail;
             continue;
         } else {
             // Unknown directive: copy the `%` through unchanged.
