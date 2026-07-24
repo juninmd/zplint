@@ -41,15 +41,13 @@
 #![forbid(unsafe_code)]
 
 mod decl;
-// Added by the statement author:  mod stmt;
-// Added by the expression author: mod expr;
+mod stmt;
+mod expr;
 
 use std::path::PathBuf;
 
 use zpc_ast::{
     Ident, Program, Span, TagRef,
-    expr::{Expr, ExprKind},
-    stmt::{Block, Stmt},
 };
 use zpc_diag::Diagnostics;
 use zpc_lex::{Token, TokenKind};
@@ -347,69 +345,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ====================================================================
-    // placeholders - see the module docs. Move these into `expr.rs`/`stmt.rs`
-    // rather than redefining them there.
-    // ====================================================================
-
-    /// Parse one expression.
-    ///
-    /// PLACEHOLDER (expression author: replace). It consumes a balanced token
-    /// region up to the first top-level `,`, `;`, closing bracket, or line break,
-    /// and yields [`ExprKind::Error`] without emitting a diagnostic - so callers
-    /// stay in sync with the token stream and no spurious errors are reported.
-    pub(crate) fn parse_expr(&mut self) -> Expr {
-        let start = self.cur_span();
-        let mut depth = 0usize;
-        let mut consumed = false;
-        loop {
-            // Pawn's optional semicolons make a line break an expression
-            // terminator, but only outside brackets.
-            if consumed && depth == 0 && self.tok().line_start {
-                break;
-            }
-            match self.peek() {
-                TokenKind::Eof => break,
-                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
-                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                }
-                TokenKind::Comma | TokenKind::Semi | TokenKind::Ellipsis if depth == 0 => break,
-                _ => {}
-            }
-            self.bump();
-            consumed = true;
-        }
-        let span =
-            if consumed { start.to(self.prev_span()) } else { Span::at(start.start) };
-        Expr { kind: ExprKind::Error(span), span }
-    }
-
-    /// Parse a `{ ... }` compound statement.
-    ///
-    /// PLACEHOLDER (statement author: replace). It skips the block
-    /// brace-balanced and returns an empty [`Block`], which is enough for
-    /// declaration parsing to walk past a function body.
-    pub(crate) fn parse_block(&mut self) -> Block {
-        let span = self.skip_braced();
-        Block { stmts: Vec::new(), span }
-    }
-
-    /// Parse one statement.
-    ///
-    /// PLACEHOLDER (statement author: replace). It drops tokens up to the end of
-    /// the statement and returns [`Stmt::Error`].
-    pub(crate) fn parse_stmt(&mut self) -> Stmt {
-        if self.at(&TokenKind::LBrace) {
-            return Stmt::Block(self.parse_block());
-        }
-        let start = self.cur_span();
-        self.skip_line();
-        Stmt::Error(start.to(self.prev_span()))
-    }
 }
 
 #[cfg(test)]
