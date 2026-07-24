@@ -4,8 +4,10 @@
 //! zlib-style licence - see ATTRIBUTION.md). This is an altered version: it produces
 //! a token stream carrying spans instead of feeding a single-pass compiler directly.
 
+pub mod preproc;
 pub mod scanner;
 pub mod token;
 
+pub use preproc::{PreprocState, Preprocessed, Preprocessor};
 pub use scanner::{DEFAULT_CTRL_CHAR, Scanner};
 pub use token::{Token, TokenKind, OPERATORS};

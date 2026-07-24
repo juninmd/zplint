@@ -61,6 +61,10 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 
 /// Container magic, `XXMA` on disk. Little-endian encoding of `0x414D5858`.
+pub mod amx_header;
+
+pub use amx_header::AmxHeader;
+
 pub const MAGIC: u32 = 0x414D_5858;
 /// Container magic as it appears on disk, for byte-level assertions.
 pub const MAGIC_BYTES: [u8; 4] = *b"XXMA";
