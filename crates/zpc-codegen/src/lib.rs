@@ -66,7 +66,9 @@ pub mod stmt;
 pub mod stream;
 
 pub use emit::{Generator, Unit};
-pub use stream::{AsmError, AsmStream, Item, LabelId, Operand, Reg, assemble, render_asm};
+pub use stream::{
+    AsmError, AsmStream, Item, LabelId, Operand, Reg, assemble, assemble_with_labels, render_asm,
+};
 
 #[cfg(test)]
 mod tests;

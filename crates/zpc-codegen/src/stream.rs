@@ -322,6 +322,17 @@ impl AsmStream {
 /// This is the job `sc6.c` does in two passes: collect `lbltab[]`, then write the
 /// opcodes with the addresses substituted.
 pub fn assemble(items: &[Item]) -> Result<Vec<u8>, AsmError> {
+    assemble_with_labels(items).map(|(code, _)| code)
+}
+
+/// Assemble, also returning where each label landed.
+///
+/// The driver needs this: a public function's entry address is the address of
+/// its label, and the AMX publics table stores that address. Without the map the
+/// table can only be filled with zeros, which loads but calls nothing.
+pub fn assemble_with_labels(
+    items: &[Item],
+) -> Result<(Vec<u8>, HashMap<LabelId, i32>), AsmError> {
     let mut addr: HashMap<LabelId, i32> = HashMap::new();
     let mut pc: u32 = 0;
     for item in items {
@@ -363,7 +374,7 @@ pub fn assemble(items: &[Item]) -> Result<Vec<u8>, AsmError> {
             }
         }
     }
-    Ok(out)
+    Ok((out, addr))
 }
 
 /// Render the stream the way `stgwrite()` does: one tab-indented mnemonic per

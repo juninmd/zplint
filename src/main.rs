@@ -2,6 +2,7 @@ mod api;
 mod api_check;
 mod config;
 mod detectors;
+mod compile_cmd;
 mod disasm_cmd;
 mod discover;
 mod engine;
@@ -36,6 +37,19 @@ enum Command {
     Fix {
         files: Vec<PathBuf>,
     },
+    /// Compile a .sma plugin to .amxx
+    Compile {
+        file: PathBuf,
+        /// Output path (defaults to the input with a .amxx extension)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Directory to search for #include files (repeatable)
+        #[arg(short = 'i', long = "include")]
+        includes: Vec<PathBuf>,
+        /// Print the generated assembly before writing the output
+        #[arg(long)]
+        emit_asm: bool,
+    },
     /// Disassemble a compiled .amxx (or raw .amx) plugin
     Disasm {
         file: PathBuf,
@@ -60,6 +74,9 @@ fn main() {
         }
         Some(Command::Lint { files }) => {
             run_lint(&root, &cfg, files);
+        }
+        Some(Command::Compile { file, output, includes, emit_asm }) => {
+            std::process::exit(compile_cmd::run(&file, output, includes, emit_asm));
         }
         Some(Command::Disasm { file, normalised }) => {
             std::process::exit(disasm_cmd::run(&file, normalised));
@@ -123,3 +140,4 @@ fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
         eprintln!("No fixes needed");
     }
 }
+

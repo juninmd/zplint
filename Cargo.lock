@@ -686,6 +686,7 @@ dependencies = [
 name = "zpc-asm"
 version = "0.1.0"
 dependencies = [
+ "zpc-amxx",
  "zpc-diag",
 ]
 
@@ -700,8 +701,11 @@ dependencies = [
 name = "zpc-codegen"
 version = "0.1.0"
 dependencies = [
+ "zpc-asm",
  "zpc-ast",
  "zpc-diag",
+ "zpc-lex",
+ "zpc-parse",
  "zpc-sema",
 ]
 
@@ -748,4 +752,8 @@ dependencies = [
  "walkdir",
  "zpc-amxx",
  "zpc-asm",
+ "zpc-codegen",
+ "zpc-diag",
+ "zpc-lex",
+ "zpc-parse",
 ]
