@@ -29,17 +29,15 @@
 //! * **User-defined operators** (`operator+(Float:,Float:)`): `check_userop()` in
 //!   `sc3.c` rewrites almost every operator emission into a function call.
 //!   `FuncName::Operator` raises error 7.
-//! * **Functions returning arrays**: the hidden heap parameter of `doreturn()`
-//!   (`sc1.c:5493`) and the `popreg(sPRI)` at the end of `callfunction()`.
-//! * **The peephole optimiser** (`sc7.c`): the output here is the unoptimised
-//!   stream, which is exactly what `sc4.c` alone produces.
-//! * **The index vector of a multi-dimensional array**: [`layout::VarKind`]
-//!   reserves the cells (`calc_arraysize()`), and indexing follows the offset with
-//!   `load.i`, but the initialiser does not *write* the vector, so a
-//!   multi-dimensional array reads zeroes at its major dimension.
+//! * **Some `sc7.c` peephole sequences.** [`peephole::optimise`] ports most of
+//!   `sequences[]`; the rows it deliberately leaves out (the chained-relational
+//!   `xchg` family, the `;$lcl` declaration rows and the user-defined-operator
+//!   push pairs) are listed with their reasons at the end of [`peephole`].
 //! * **Heap equilibration across the arms of `?:`** (the `heap1`/`heap2`
-//!   bookkeeping in `hier13()`), which only matters once functions may return
-//!   arrays.
+//!   bookkeeping in `hier13()`, `sc3.c:1036-1066`). Now that a call may leave an
+//!   array on the heap, a `?:` whose two arms claim different amounts leaves the
+//!   heap unbalanced on one path. The `decl_heap` counter is threaded through
+//!   [`emit::Generator::expression`] but not yet through `hier13()`.
 //! * **Block-local `enum`**: only file-scope enums are folded into constants.
 //! * **Tags**: no tag ids are propagated, so `exit`/`sleep` always pass tag 0 and
 //!   no warning 213 is raised here. Tag checking is [`zpc_sema::tags`]' job.
@@ -54,18 +52,21 @@
 //!   behavioural one - but a byte-level differential test against amxxpc will see
 //!   it.
 //! * **`lastst` tracking.** Upstream suppresses the trailing `zero.pri; retn` when
-//!   the last statement was a `return` or `goto`. That bookkeeping is left to the
-//!   peephole pass, so a function ending in `return` gets one dead pair here.
+//!   the last statement was a `return` or `goto` (`sc1.c:3517`). Here the pair is
+//!   always emitted and [`peephole::optimise`] deletes it as unreachable code,
+//!   reaching the same accept set without threading `lastst` through codegen.
 
 #![forbid(unsafe_code)]
 
 pub mod expr;
 pub mod emit;
 pub mod layout;
+pub mod peephole;
 pub mod stmt;
 pub mod stream;
 
 pub use emit::{Generator, Unit};
+pub use peephole::optimise;
 pub use stream::{
     AsmError, AsmStream, Item, LabelId, Operand, Reg, assemble, assemble_with_labels, render_asm,
 };

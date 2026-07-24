@@ -590,6 +590,15 @@ impl Generator {
                 let d = self.expr_dims(base);
                 d.get(1..).map(<[i32]>::to_vec).unwrap_or_default()
             }
+            // The result of an array-returning call is an `iREFARRAY` whose
+            // dimensions are the ones attached to the function symbol
+            // (`lval_result->sym=symret`, sc3.c:1911), so it can be subscripted.
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Ident(id) => {
+                    self.env.func(&id.name).map(|f| f.ret_dims.clone()).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            },
             ExprKind::Cast { expr, .. } => self.expr_dims(expr),
             _ => Vec::new(),
         }
@@ -673,6 +682,10 @@ impl Generator {
         if char_index { Val::ArrayChar } else { Val::ArrayCell }
     }
 
+    pub(crate) fn expr_name(&self, expr: &Expr) -> String {
+        self.name_of(expr)
+    }
+
     fn name_of(&self, expr: &Expr) -> String {
         match &expr.kind {
             ExprKind::Ident(id) => id.name.clone(),
@@ -751,6 +764,27 @@ impl Generator {
                 .count(),
         );
 
+        // `callfunction()` (sc3.c:1896-1912): "check whether this is a function
+        // that returns an array ... allocate space on the heap for the array, and
+        // pass the pointer to the reserved memory block as a hidden parameter".
+        //
+        //     modheap(retsize*sizeof(cell));  /* address is in ALT */
+        //     pushreg(sALT);                  /* the last (hidden) parameter */
+        //     decl_heap+=retsize;
+        //
+        // It runs *before* any argument is evaluated and outside the staging marks
+        // that sc7.c reorders, so the hidden pointer is pushed first and therefore
+        // lands at the highest address of the argument block - FRM+(n+3)*cell, the
+        // slot doreturn() reads (sc1.c:5493-5502). It is deliberately *not*
+        // counted in `nargs`, so `retn` leaves it on the stack for the `pop.pri`
+        // below to collect.
+        let returns_array = info.returns_array();
+        if returns_array {
+            self.asm.modheap(info.ret_cells() * CELL);
+            self.asm.pushreg(Reg::Alt);
+            self.decl_heap += info.ret_cells();
+        }
+
         let mut heapalloc = 0i32;
         // Descending order: this is the reordering sc7.c performs.
         for idx in (0..slots.len()).rev() {
@@ -793,6 +827,15 @@ impl Generator {
             }
         }
         self.asm.modheap(-heapalloc * CELL);
+        if returns_array {
+            // sc3.c:2289-2290: `if (symret!=NULL) popreg(sPRI);` - "pop hidden
+            // parameter as function result". The callee never puts the address in
+            // PRI itself (sc1.c:5532: "moveto1() is not necessary, callfunction()
+            // does a popreg()"). The heap block stays allocated until the end of
+            // the enclosing expression; `expression()` (sc3.c:682) releases it.
+            self.asm.popreg(Reg::Pri);
+            return Val::ArrayRef;
+        }
         Val::Expr
     }
 

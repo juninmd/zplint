@@ -91,6 +91,15 @@ pub struct Generator {
 
     /// Cells of locals allocated in the current function, `declared` in `sc1.c`.
     pub(crate) declared: i32,
+    /// Heap cells claimed by the expression currently being emitted, `decl_heap`
+    /// in `sc3.c`. `expression()` (`sc3.c:674-683`) gives them back at the end of
+    /// every full expression: "scrap any arrays left on the heap".
+    pub(crate) decl_heap: i32,
+    /// The number of declared parameters and the return dimensions of the
+    /// function being emitted - what `doreturn()` needs to find the hidden
+    /// destination parameter.
+    pub(crate) cur_nargs: i32,
+    pub(crate) cur_ret_dims: Vec<i32>,
     pub(crate) loops: Vec<LoopFrame>,
     pub(crate) goto_labels: HashMap<String, LabelId>,
     /// Native names in the order their `sysreq.c` indices were handed out.
@@ -111,6 +120,9 @@ impl Generator {
             fold_env: MapEnv::new(),
             tags: TagConfig::default(),
             declared: 0,
+            decl_heap: 0,
+            cur_nargs: 0,
+            cur_ret_dims: Vec::new(),
             loops: Vec::new(),
             goto_labels: HashMap::new(),
             natives: Vec::new(),
@@ -135,6 +147,27 @@ impl Generator {
         };
         self.diags = diags;
         result
+    }
+
+    /// `expression()` in `sc3.c`:
+    ///
+    /// ```c
+    /// int locheap=decl_heap;
+    /// if (hier14(&lval)) rvalue(&lval);
+    /// /* scrap any arrays left on the heap */
+    /// modheap((locheap-decl_heap)*sizeof(cell));
+    /// decl_heap=locheap;
+    /// ```
+    ///
+    /// Every full expression must be wrapped in this, or the heap block an
+    /// array-returning call reserves is never given back. `modheap(0)` emits
+    /// nothing, so wrapping an expression that claims no heap is free.
+    pub(crate) fn expression<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let locheap = self.decl_heap;
+        let r = f(self);
+        self.asm.modheap((locheap - self.decl_heap) * CELL);
+        self.decl_heap = locheap;
+        r
     }
 
     /// `constexpr()`: demand a constant, error 8 otherwise.
@@ -247,8 +280,91 @@ impl Generator {
             self.publics.push((name.name.clone(), l));
         }
 
+        // `funcstub()` (sc1.c:3242-3258) reads the `[n]` list that sits between the
+        // return tag and the name (`native Float:[3] make_vec();`). Every dimension
+        // must be known: `if (size==0) error(9)`.
+        let mut ret_dims = Vec::new();
+        for dim in &f.return_dims {
+            let n = match &dim.size {
+                Some(e) => self.const_expr(e),
+                None => 0,
+            };
+            if n <= 0 {
+                self.error(9, dim.span, &[]);
+                ret_dims.clear();
+                break;
+            }
+            ret_dims.push(n);
+        }
+        // `newfunc()` has no return-dimension loop, so a *definition* gets its
+        // shape from `doreturn()` instead: "this function does not yet have an
+        // array attached; clone the returned symbol beneath the current function"
+        // (sc1.c:5473-5508). Upstream can do that during the write pass because
+        // it re-parses (`sc_reparse=TRUE`, sc1.c:5518) when the function was
+        // already called; the single pass here has to infer it up front.
+        //
+        // A definition that follows a `forward`/`native` keeps the *declared*
+        // shape, so that `doreturn()` can compare the returned array against it
+        // and raise error 47 on a mismatch (sc1.c:5450-5472).
+        if ret_dims.is_empty()
+            && let Some(existing) = self.env.func(&name.name)
+        {
+            ret_dims = existing.ret_dims.clone();
+        }
+        if ret_dims.is_empty() {
+            ret_dims = self.infer_return_dims(f);
+        }
+
         self.table.declare(SymbolDecl::new(&name.name, SymKind::Function, name.span));
-        self.env.declare_func(name.name.clone(), FuncInfo { callee, params, variadic });
+        self.env.declare_func(name.name.clone(), FuncInfo { callee, params, variadic, ret_dims });
+    }
+
+    /// The shape `doreturn()` would clone beneath the function symbol: the
+    /// dimensions of the array named by the first `return <name>;` in the body.
+    ///
+    /// Only a plain identifier naming an unambiguously declared array is
+    /// accepted. `doreturn()` insists on a symbol as well ("returning a literal
+    /// string is not supported (it must be a variable)", `sc1.c:5427-5430`) and on
+    /// every dimension being known (`error(46)`, `sc1.c:5490`). Anything less
+    /// certain than that yields no shape, so the function keeps the ordinary
+    /// cell-returning convention and `do_return` diagnoses the mismatch rather
+    /// than emitting a copy against a parameter slot that does not exist.
+    fn infer_return_dims(&mut self, f: &FuncDecl) -> Vec<i32> {
+        let Some(body) = &f.body else { return Vec::new() };
+
+        let mut arrays: HashMap<String, Vec<i32>> = HashMap::new();
+        let mut ambiguous: Vec<String> = Vec::new();
+        let mut returned: Option<String> = None;
+        let mut decls: Vec<Declarator> = Vec::new();
+        collect_return_shape(&body.stmts, &mut decls, &mut returned);
+
+        for d in decls {
+            if d.dims.is_empty() {
+                continue;
+            }
+            let dims = self.var_kind(&d, false).dims().to_vec();
+            if arrays.insert(d.name.name.clone(), dims).is_some() {
+                // Two `new` declarations of the same name in one body: which one
+                // the `return` sees depends on scope, which this walk does not
+                // model, so decline to guess.
+                ambiguous.push(d.name.name.clone());
+            }
+        }
+
+        let Some(name) = returned else { return Vec::new() };
+        if ambiguous.contains(&name) {
+            return Vec::new();
+        }
+        let dims = arrays
+            .get(&name)
+            .cloned()
+            .or_else(|| {
+                // A returned parameter array or global.
+                self.env.var(&name).filter(|v| v.kind.is_array()).map(|v| v.kind.dims().to_vec())
+            })
+            .unwrap_or_default();
+        // "check that all dimensions are known": `if (dim[numdim]<=0) error(46)`.
+        if dims.iter().any(|&d| d <= 0) { Vec::new() } else { dims }
     }
 
     fn collect_const(&mut self, c: &ConstDecl) {
@@ -314,10 +430,17 @@ impl Generator {
 
             // Global initialisers are written straight into the data segment;
             // no code is generated (declglb() in sc1.c fills litq).
-            if let Some(init) = &d.init {
-                let dims =
-                    self.env.var(&d.name.name).map(|v| v.kind.dims().to_vec()).unwrap_or_default();
-                let values = self.init_cells(init, &dims);
+            let dims =
+                self.env.var(&d.name.name).map(|v| v.kind.dims().to_vec()).unwrap_or_default();
+            let values = match &d.init {
+                Some(init) => self.init_cells(init, &dims),
+                // "if (!matchtoken('=')) ... first reserve space for the
+                // indirection vectors of the array, then adjust it to contain the
+                // proper values" - sc1.c:2311-2330. An *uninitialised*
+                // multi-dimensional array still needs its index vectors.
+                None => crate::layout::indirection_tables(&dims),
+            };
+            if !values.is_empty() {
                 self.data.init_at(addr, &values);
             }
         }
@@ -362,10 +485,59 @@ impl Generator {
         }
     }
 
-    /// Flatten an initialiser to cells. Multi-dimensional initialisers are laid out
-    /// row-major *without* the leading index vector, which is the part of
-    /// `initarray()` that is not implemented - see the crate docs.
+    /// The complete data image of an initialised variable: the index vectors of
+    /// every dimension but the last, followed by the element data row-major.
+    ///
+    /// This is `initials2()` (`sc1.c:2282`): it reserves
+    /// `calc_arraysize(dim,numdim-1,0)` zero cells (line 2356), lets `initarray()`
+    /// append the rows, then calls `adjust_indirectiontables()` (line 2395) to fill
+    /// the reserved cells in. A one-dimensional array has no vector at all
+    /// (`initvector(...,dim[0],FALSE,...)`, line 2342) and is *not* zero-padded.
     pub(crate) fn init_cells(&mut self, init: &Init, dims: &[i32]) -> Vec<i32> {
+        if dims.len() > 1 {
+            let mut image = crate::layout::indirection_tables(dims);
+            image.extend(self.init_rows(init, dims));
+            return image;
+        }
+        self.init_leaf_cells(init, dims)
+    }
+
+    /// The element data of a multi-dimensional initialiser, row-major and padded.
+    ///
+    /// `initarray()` (`sc1.c:2410`) walks the major dimensions and hands each
+    /// innermost row to `initvector(..., dim[numdim-1], TRUE, ...)`; the `TRUE` is
+    /// `fillzero`, so a short row is padded to the declared minor size (`sc1.c:2561`
+    /// `while ((litidx-curlit)<(int)size) litadd(0)`). Rows that the initialiser
+    /// omits entirely stay zero, which is what makes the fixed offsets computed by
+    /// `adjust_indirectiontables()` correct.
+    fn init_rows(&mut self, init: &Init, dims: &[i32]) -> Vec<i32> {
+        let want: usize = dims.iter().map(|&d| d.max(0) as usize).product();
+        let mut out = match dims {
+            [_] | [] => self.init_leaf_cells(init, dims),
+            [_, rest @ ..] => match init {
+                Init::List(list) => {
+                    let mut out = Vec::with_capacity(want);
+                    for elem in &list.elems {
+                        if out.len() >= want {
+                            // error 18 (initialisation data exceeds array size) is
+                            // the parser's; codegen only refuses to overflow.
+                            break;
+                        }
+                        out.extend(self.init_rows(elem, rest));
+                    }
+                    out
+                }
+                // A non-braced initialiser for a multi-dimensional array only
+                // reaches here for a string, which fills the first row.
+                Init::Expr(_) => self.init_leaf_cells(init, &dims[dims.len() - 1..]),
+            },
+        };
+        out.resize(want, 0);
+        out
+    }
+
+    /// One innermost row (or a whole one-dimensional array), unpadded.
+    fn init_leaf_cells(&mut self, init: &Init, dims: &[i32]) -> Vec<i32> {
         match init {
             Init::Expr(e) => match &e.kind {
                 ExprKind::Str(s) => self.string_cells(s),
@@ -382,7 +554,7 @@ impl Generator {
         let inner = dims.split_first().map(|(_, rest)| rest).unwrap_or(&[]);
         let mut out = Vec::new();
         for elem in &list.elems {
-            out.extend(self.init_cells(elem, inner));
+            out.extend(self.init_leaf_cells(elem, inner));
         }
         // `{1, 3, ...}` EXTRAPOLATES: it does not repeat the last value. `initvector()`
         // (sc1.c) keeps the previous two values and computes `step = prev1 - prev2`,
@@ -451,7 +623,8 @@ impl Generator {
     fn function(&mut self, f: &FuncDecl) {
         let Some(body) = &f.body else { return };
         let FuncName::Ident(name) = &f.name else { return };
-        let Some(FuncInfo { callee: Callee::Func(label), .. }) = self.env.func(&name.name).cloned()
+        let Some(info @ FuncInfo { callee: Callee::Func(label), .. }) =
+            self.env.func(&name.name).cloned()
         else {
             return;
         };
@@ -459,6 +632,9 @@ impl Generator {
         self.asm.place(label);
         self.asm.emit0(Opcode::Proc); // startfunc(): "creates stack frame"
         self.declared = 0;
+        self.decl_heap = 0;
+        self.cur_nargs = info.params.len() as i32;
+        self.cur_ret_dims = info.ret_dims.clone();
         self.goto_labels.clear();
         self.env.enter();
         self.bind_params(f);
@@ -509,6 +685,53 @@ impl Generator {
             let mut info = VarInfo { addr, class: Class::Local, kind, is_const: d.is_const };
             info.is_const = d.is_const;
             self.env.declare_local(d.name.name.clone(), info);
+        }
+    }
+}
+
+/// Gather every `new` declarator in a body and the name of the first
+/// `return <ident>;`. Used only by [`Generator::infer_return_dims`].
+fn collect_return_shape(
+    stmts: &[zpc_ast::stmt::Stmt],
+    decls: &mut Vec<Declarator>,
+    returned: &mut Option<String>,
+) {
+    use zpc_ast::stmt::{ForInit, Stmt};
+    for s in stmts {
+        match s {
+            Stmt::Var(v) => decls.extend(v.declarators.iter().cloned()),
+            Stmt::Return { value: Some(e), .. } => {
+                if returned.is_none()
+                    && let ExprKind::Ident(id) = &e.kind
+                {
+                    *returned = Some(id.name.clone());
+                }
+            }
+            Stmt::Block(b) => collect_return_shape(&b.stmts, decls, returned),
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_return_shape(std::slice::from_ref(then_branch.as_ref()), decls, returned);
+                if let Some(alt) = else_branch {
+                    collect_return_shape(std::slice::from_ref(alt.as_ref()), decls, returned);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_return_shape(std::slice::from_ref(body.as_ref()), decls, returned);
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(ForInit::Decl(v)) = init {
+                    decls.extend(v.declarators.iter().cloned());
+                }
+                collect_return_shape(std::slice::from_ref(body.as_ref()), decls, returned);
+            }
+            Stmt::Switch { cases, default, .. } => {
+                for c in cases {
+                    collect_return_shape(std::slice::from_ref(&c.body), decls, returned);
+                }
+                if let Some(d) = default {
+                    collect_return_shape(std::slice::from_ref(d.as_ref()), decls, returned);
+                }
+            }
+            _ => {}
         }
     }
 }

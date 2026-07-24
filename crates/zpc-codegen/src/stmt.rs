@@ -44,14 +44,14 @@ impl Generator {
         match stmt {
             Stmt::Block(b) => self.block(b),
             Stmt::Empty(_) => {}
-            Stmt::Expr { expr, .. } => {
-                let v = self.eval(expr);
+            Stmt::Expr { expr, .. } => self.expression(|g| {
+                let v = g.eval(expr);
                 // A bare lvalue statement still has to be materialised, because
                 // `doexpr()` ends with `markexpr(sEXPR)` on a loaded value.
                 if matches!(v, Val::Var(_) | Val::ArrayCell | Val::ArrayChar) {
-                    self.rvalue(&v);
+                    g.rvalue(&v);
                 }
-            }
+            }),
             Stmt::Var(v) => self.declloc(v),
             Stmt::Const(c) => {
                 let value = self.const_expr(&c.value);
@@ -73,7 +73,7 @@ impl Generator {
             Stmt::Switch { scrutinee, cases, default, .. } => {
                 self.do_switch(scrutinee, cases, default.as_deref());
             }
-            Stmt::Return { value, .. } => self.do_return(value.as_ref()),
+            Stmt::Return { value, span } => self.do_return(value.as_ref(), *span),
             Stmt::Break { span } => self.do_break(*span),
             Stmt::Continue { span } => self.do_continue(*span),
             Stmt::Goto { label, .. } => {
@@ -92,7 +92,7 @@ impl Generator {
             Stmt::Assert { exprs, .. } => {
                 for e in exprs {
                     let ok = self.asm.label();
-                    self.load(e);
+                    self.expression(|g| g.load(e));
                     self.asm.jmp_ne0(ok);
                     self.asm.ffabort(X_ASSERTION);
                     self.asm.place(ok);
@@ -136,13 +136,13 @@ impl Generator {
             if info.kind.is_array() {
                 self.init_local_array(d, &info, cells);
             } else {
-                match &d.init {
+                self.expression(|g| match &d.init {
                     Some(Init::Expr(e)) => {
-                        self.load(e);
+                        g.load(e);
                     }
                     // "uninitialized variable, set to zero"
-                    _ => self.asm.ldconst(0, Reg::Pri),
-                }
+                    _ => g.asm.ldconst(0, Reg::Pri),
+                });
                 let target = Val::Var(info);
                 self.store(&target);
             }
@@ -153,7 +153,10 @@ impl Generator {
     fn init_local_array(&mut self, d: &Declarator, info: &VarInfo, cells: i32) {
         let values = match &d.init {
             Some(init) => self.init_cells(init, info.kind.dims()),
-            None => Vec::new(),
+            // An uninitialised multi-dimensional array is still not all zeroes:
+            // `initials2()` (sc1.c:2311-2330) reserves and then fills the
+            // indirection vectors even when there is no `=`.
+            None => crate::layout::indirection_tables(info.kind.dims()),
         };
         if values.len() < cells as usize {
             // fillarray(sym, size, 0)
@@ -190,7 +193,7 @@ impl Generator {
             let code = if c.is_zero() { 205 } else { 206 };
             self.error(code, cond.span, &[]);
         }
-        self.load(cond);
+        self.expression(|g| g.load(cond));
         if jump_if_true {
             self.asm.jmp_ne0(target);
         } else {
@@ -253,10 +256,10 @@ impl Generator {
         self.env.enter();
         match init {
             Some(ForInit::Decl(v)) => self.declloc(v),
-            Some(ForInit::Expr(e)) => {
-                let v = self.eval(e);
-                self.rvalue(&v);
-            }
+            Some(ForInit::Expr(e)) => self.expression(|g| {
+                let v = g.eval(e);
+                g.rvalue(&v);
+            }),
             None => {}
         }
 
@@ -273,8 +276,10 @@ impl Generator {
         self.asm.jumplabel(skiplab);
         self.asm.place(frame.loop_top);
         if let Some(step) = step {
-            let v = self.eval(step);
-            self.rvalue(&v);
+            self.expression(|g| {
+                let v = g.eval(step);
+                g.rvalue(&v);
+            });
         }
         self.asm.place(skiplab);
         if let Some(cond) = cond {
@@ -320,16 +325,66 @@ impl Generator {
     }
 
     /// `doreturn()`: the whole local frame is dropped, then `retn`.
-    fn do_return(&mut self, value: Option<&Expr>) {
-        match value {
-            Some(e) => {
-                self.load(e);
+    ///
+    /// A function declared as returning an array copies the returned array into a
+    /// caller-supplied heap block instead of loading a value into PRI
+    /// (`sc1.c:5521-5532`):
+    ///
+    /// ```c
+    /// address(sub,sALT);                /* ALT = destination */
+    /// arraysize=calc_arraysize(dim,numdim,0);
+    /// memcopy(arraysize*sizeof(cell));  /* source already in PRI */
+    /// /* moveto1(); is not necessary, callfunction() does a popreg() */
+    /// ```
+    ///
+    /// `sub` is an `iREFARRAY` at `(argcount+3)*sizeof(cell)` (`sc1.c:5508`), and
+    /// `address()` on an `iREFARRAY` is `load.s.alt` regardless of `vclass`
+    /// (`sc4.c:423-433`) - the slot holds the heap address, not the array.
+    fn do_return(&mut self, value: Option<&Expr>, span: Span) {
+        let ret_dims = self.cur_ret_dims.clone();
+        if !ret_dims.is_empty() {
+            match value {
+                Some(e) => self.return_array(e, &ret_dims),
+                // "function should return a value" (sc1.c:5537-5541)
+                None => self.error(209, span, &["<function>"]),
             }
-            None => self.asm.ldconst(0, Reg::Pri),
+        } else {
+            // Returning an array from a function whose shape could not be
+            // determined would compile a `load.i` of the base address, which is
+            // silently wrong. `doreturn()` reaches the same conclusion through
+            // `error(46)`, "unknown array size" (sc1.c:5490-5491).
+            if let Some(e) = value
+                && !self.expr_dims(e).is_empty()
+            {
+                self.error(46, e.span, &[&self.expr_name(e)]);
+            }
+            self.expression(|g| match value {
+                Some(e) => {
+                    g.load(e);
+                }
+                None => g.asm.ldconst(0, Reg::Pri),
+            });
         }
         let declared = self.declared;
         self.asm.modstk(declared * CELL);
         self.asm.ffret();
+    }
+
+    fn return_array(&mut self, e: &Expr, ret_dims: &[i32]) {
+        let dims = self.expr_dims(e);
+        let v = self.expression(|g| g.eval(e));
+        if !matches!(v, Val::ArrayRef) {
+            // "constant array must be assigned to a symbol" / mixing return forms.
+            self.error(39, e.span, &[]);
+            return;
+        }
+        if dims != ret_dims {
+            // error 47: "array sizes do not match, or destination array is too small"
+            self.error(47, e.span, &[]);
+        }
+        // The hidden parameter sits one slot past the last declared argument.
+        self.asm.emit1(Opcode::LoadSAlt, (self.cur_nargs + 3) * CELL);
+        self.asm.memcopy(crate::layout::calc_arraysize(ret_dims) * CELL);
     }
 
     /// `doexit()`/`dosleep()`: value in PRI, tag in ALT, then `halt`.
@@ -337,12 +392,12 @@ impl Generator {
     /// The tag is always 0 here because codegen does not carry tags; `exporttag()`
     /// belongs to the tag table, which is a separate phase.
     fn do_abort(&mut self, value: Option<&Expr>, reason: i32) {
-        match value {
+        self.expression(|g| match value {
             Some(e) => {
-                self.load(e);
+                g.load(e);
             }
-            None => self.asm.ldconst(0, Reg::Pri),
-        }
+            None => g.asm.ldconst(0, Reg::Pri),
+        });
         self.asm.ldconst(0, Reg::Alt);
         self.asm.ffabort(reason);
     }
@@ -357,7 +412,7 @@ impl Generator {
     /// `(value, address)` pairs, so an abstract machine can binary-search it.
     /// A `case 1 .. 5:` range is *expanded* into one record per value.
     fn do_switch(&mut self, scrutinee: &Expr, cases: &[SwitchCase], default: Option<&Stmt>) {
-        self.load(scrutinee);
+        self.expression(|g| g.load(scrutinee));
         let table = self.asm.label();
         let exit = self.asm.label();
         self.asm.ffswitch(table);

@@ -86,6 +86,13 @@ fn normalised(src: &str) -> String {
     render(&d, Style::Normalised)
 }
 
+/// Where the index-vector cell at `i` points: the offsets that
+/// `adjust_indirectiontables()` stores are relative to the address of the cell
+/// that holds them, so cell `i` selects cell `(i*cell + data[i]) / cell`.
+fn follows(data: &[i32], i: usize) -> usize {
+    (i * 4 + data[i] as usize) / 4
+}
+
 // ------------------------------------------------------------ frame layout
 
 #[test]
@@ -678,6 +685,236 @@ fn an_ellipsis_initialiser_extrapolates_rather_than_repeating() {
     // A descending pair extrapolates downwards.
     let down = compile("new g[4] = {10, 8, ...}; foo() { return g[0]; }");
     assert_eq!(down.data, vec![10, 8, 6, 4]);
+}
+
+// ------------------------------------------------ functions returning arrays
+
+#[test]
+fn calling_an_array_returning_function_reserves_a_hidden_heap_parameter() {
+    // callfunction() (sc3.c:1899-1912):
+    //   modheap(retsize*sizeof(cell));  /* address is in ALT */
+    //   pushreg(sALT);                  /* pass ALT as the last (hidden) param */
+    // ...and after the call (sc3.c:2289-2290):
+    //   if (symret!=NULL) popreg(sPRI); /* pop hidden param as function result */
+    let src = "make() { new v[3]; return v; } foo() { make(); }";
+    let items = body(src);
+    assert_eq!(
+        opcodes(&items),
+        [
+            Opcode::Heap,    // reserve 3 cells, old HEA -> ALT
+            Opcode::PushAlt, // the hidden destination, pushed *first*
+            Opcode::PushC,   // argument count: 0 arguments
+            Opcode::Call,
+            Opcode::PopPri, // the hidden parameter *is* the result
+            Opcode::Heap,   // expression(): scrap the array left on the heap
+            Opcode::ZeroPri,
+            Opcode::Retn,
+        ]
+    );
+    assert_eq!(imms_of(&items, Opcode::Heap), vec![3 * 4, -3 * 4]);
+    assert_eq!(first_imm(&items, Opcode::PushC), 0, "the hidden parameter is not counted");
+}
+
+#[test]
+fn a_native_returning_an_array_uses_the_same_convention() {
+    // funcstub() attaches the return array to natives too (sc1.c:3333-3337), so
+    // finddepend() finds it in callfunction() and the convention is identical.
+    // The `stack` that cleans up after a sysreq covers nargs+1 cells only - the
+    // hidden parameter is left for the pop.pri.
+    let items = body("native Float:[3] vel(id); foo() { vel(1); }");
+    assert_eq!(
+        opcodes(&items),
+        [
+            Opcode::Heap,
+            Opcode::PushAlt,
+            Opcode::ConstPri,
+            Opcode::PushPri,
+            Opcode::PushC,
+            Opcode::SysreqC,
+            Opcode::Stack,
+            Opcode::PopPri,
+            Opcode::Heap,
+            Opcode::ZeroPri,
+            Opcode::Retn,
+        ]
+    );
+    assert_eq!(first_imm(&items, Opcode::Stack), 2 * 4, "one real argument plus the count cell");
+    assert_eq!(imms_of(&items, Opcode::Heap), vec![3 * 4, -3 * 4]);
+}
+
+#[test]
+fn returning_an_array_copies_into_the_hidden_parameter() {
+    // doreturn() (sc1.c:5521-5531): ALT = the hidden parameter, PRI already holds
+    // the source address, then `memcopy(arraysize*sizeof(cell))`. PRI is left
+    // alone because callfunction() supplies the result with its popreg().
+    let items = body("make() { new v[3]; return v; }");
+    let ops = opcodes(&items);
+    let movs = ops.iter().position(|o| *o == Opcode::Movs).expect("the copy");
+    assert_eq!(
+        ops[movs - 2..=movs],
+        [Opcode::AddrPri, Opcode::LoadSAlt, Opcode::Movs],
+        "source address in PRI, hidden destination in ALT"
+    );
+    assert_eq!(first_imm(&items, Opcode::Movs), 3 * 4);
+    // The hidden parameter is one slot past the last declared argument:
+    // base + (n+3)*cell, with n == 0 here (sc1.c:5493-5502).
+    assert_eq!(first_imm(&items, Opcode::LoadSAlt), 3 * 4);
+
+    // With two declared arguments it moves to FRM + (2+3)*cell.
+    let items = body("make(a, b) { new v[4]; return v; }");
+    assert_eq!(first_imm(&items, Opcode::LoadSAlt), 5 * 4);
+    assert_eq!(first_imm(&items, Opcode::Movs), 4 * 4);
+}
+
+#[test]
+fn an_array_returning_function_copies_its_index_vectors_too() {
+    // calc_arraysize({2,3}) == 8, not 6: the returned block includes the index
+    // vector, so both the caller's heap reservation and the callee's memcopy
+    // must be 8 cells (sc1.c:5530).
+    let items = body("make() { new v[2][3]; return v; }");
+    // The first `movs` is declloc() copying `v`'s own index vector in; the last
+    // one is the return copy.
+    assert_eq!(*imms_of(&items, Opcode::Movs).last().unwrap(), 8 * 4);
+    let items = body("make() { new v[2][3]; return v; } foo() { make(); }");
+    assert_eq!(imms_of(&items, Opcode::Heap), vec![8 * 4, -8 * 4]);
+}
+
+#[test]
+fn the_result_of_an_array_returning_call_can_be_subscripted() {
+    // lval_result->ident=iREFARRAY (sc3.c:1910), so hier1() may index it.
+    let items = body("make() { new v[3]; return v; } foo() { return make()[1]; }");
+    let ops = opcodes(&items);
+    let pop = ops.iter().position(|o| *o == Opcode::PopPri).expect("the hidden result");
+    assert_eq!(
+        ops[pop..pop + 4],
+        [Opcode::PopPri, Opcode::ConstAlt, Opcode::Add, Opcode::LoadI],
+        "index 1 is a constant offset from the returned address"
+    );
+    assert_eq!(imms_of(&items, Opcode::ConstAlt), vec![4], "one cell in");
+}
+
+#[test]
+fn the_heap_is_scrapped_once_per_full_expression_not_per_call() {
+    // expression() (sc3.c:674-683) snapshots decl_heap and gives back the whole
+    // delta at the end, so two calls in one expression share one `heap -N`.
+    let items = body("make() { new v[3]; return v; } foo() { make()[0] + make()[1]; }");
+    assert_eq!(
+        imms_of(&items, Opcode::Heap),
+        vec![3 * 4, 3 * 4, -6 * 4],
+        "two reservations, one release"
+    );
+}
+
+#[test]
+fn a_return_dimension_must_have_a_known_size() {
+    // funcstub() (sc1.c:3250-3252): `if (size==0) error(9)`.
+    // A literal `[]` is caught by the parser; a size that *folds* to zero is
+    // codegen's to catch, exactly as `needsub()` returning 0 is in funcstub().
+    let unit = compile("const N = 0; native Float:[N] make();");
+    assert!(unit.diags.items().iter().any(|d| d.code == 9), "{:?}", unit.diags.items());
+}
+
+#[test]
+fn returning_a_mismatched_array_is_error_47() {
+    let unit = compile("forward [3] make(); make() { new v[4]; return v; }");
+    assert!(unit.diags.items().iter().any(|d| d.code == 47), "{:?}", unit.diags.items());
+}
+
+// --------------------------------------- multi-dimensional array index vectors
+
+#[test]
+fn a_two_dimensional_global_is_an_index_vector_followed_by_the_rows() {
+    // initials2() (sc1.c:2356) reserves calc_arraysize(dim,numdim-1,0) cells,
+    // initarray() (sc1.c:2410) appends the rows row-major, and
+    // adjust_indirectiontables() (sc1.c:2244-2247) then writes
+    //     litq[base++] = (size*dim[cur] + (dim[cur+1]-1)*(dim[cur]*i+d)) * cell
+    // For dim={2,3}, cur=0, size=1:
+    //     d=0 -> (1*2 + 2*0)*4 ==  8
+    //     d=1 -> (1*2 + 2*1)*4 == 16
+    // and calc_arraysize({2,3}) == 2 + 2*3 == 8 cells in total.
+    let unit = compile("new g[2][3] = {{1,2,3},{4,5,6}}; foo() { return g[0][0]; }");
+    assert_eq!(unit.data, vec![8, 16, 1, 2, 3, 4, 5, 6]);
+
+    // The offsets are relative to the vector cell itself: cell 0 is at byte 0 and
+    // 0+8 == byte 8 == cell 2, the start of row 0. Cell 1 is at byte 4 and
+    // 4+16 == byte 20 == cell 5, the start of row 1.
+    assert_eq!(follows(&unit.data, 0), 2);
+    assert_eq!(follows(&unit.data, 1), 5);
+}
+
+#[test]
+fn short_rows_of_a_two_dimensional_array_are_zero_padded() {
+    // initarray() calls initvector(..., dim[numdim-1], TRUE, ...) - the TRUE is
+    // `fillzero` (sc1.c:2443, sc1.c:2561), so a row shorter than the declared
+    // minor dimension is padded rather than shifting the next row up. Without the
+    // padding the fixed offsets 8/16 would point at the wrong cells.
+    let unit = compile("new g[2][3] = {{1},{2}}; foo() { return g[0][0]; }");
+    assert_eq!(unit.data, vec![8, 16, 1, 0, 0, 2, 0, 0]);
+
+    // An omitted major row stays entirely zero.
+    let unit = compile("new g[2][3] = {{1,2,3}}; foo() { return g[0][0]; }");
+    assert_eq!(unit.data, vec![8, 16, 1, 2, 3, 0, 0, 0]);
+}
+
+#[test]
+fn an_uninitialised_multidimensional_array_still_gets_its_index_vector() {
+    // sc1.c:2311-2330: when there is no `=`, initials2() still reserves the
+    // vectors and calls adjust_indirectiontables() on them.
+    let unit = compile("new g[2][3]; foo() { return g[1][0]; }");
+    assert_eq!(unit.data, vec![8, 16, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn a_three_dimensional_array_puts_every_level_of_vector_first() {
+    // dim={2,2,2}: calc_arraysize({2,2}) == 6 vector cells, then 8 data cells.
+    //   cur=0, size=1: (1*2 + (2-1)*(2*0+d))*4          -> { 8, 12}
+    //   cur=1, size=2: (2*2 + (2-1)*(2*i+d))*4          -> {16,20, 24,28}
+    let unit = compile(
+        "new g[2][2][2] = {{{1,2},{3,4}},{{5,6},{7,8}}}; foo() { return g[0][0][0]; }",
+    );
+    assert_eq!(unit.data, vec![8, 12, 16, 20, 24, 28, 1, 2, 3, 4, 5, 6, 7, 8]);
+    // Cell 0 (byte 0) + 8 == cell 2, the first level-1 vector (cells 2..3).
+    assert_eq!(follows(&unit.data, 0), 2);
+    // Cell 1 (byte 4) + 12 == byte 16 == cell 4, the second level-1 vector.
+    assert_eq!(follows(&unit.data, 1), 4);
+    // Cell 2 (byte 8) + 16 == byte 24 == cell 6, the first data row.
+    assert_eq!(follows(&unit.data, 2), 6);
+    // Cell 5 (byte 20) + 28 == byte 48 == cell 12, the last data row.
+    assert_eq!(follows(&unit.data, 5), 12);
+}
+
+#[test]
+fn a_two_dimensional_string_table_lays_its_rows_out_padded() {
+    // A common Pawn idiom: an array of fixed-width strings.
+    let unit = compile("new g[2][4] = {\"ab\", \"cd\"}; foo() { return g[0][0]; }");
+    assert_eq!(
+        unit.data,
+        vec![8, 20, b'a' as i32, b'b' as i32, 0, 0, b'c' as i32, b'd' as i32, 0, 0]
+    );
+    // dim={2,4}: (1*2 + 3*d)*4 -> {8, 20}; cell 0 + 8 == cell 2, cell 1 + 20 == cell 6.
+    assert_eq!(follows(&unit.data, 0), 2);
+    assert_eq!(follows(&unit.data, 1), 6);
+}
+
+#[test]
+fn a_two_dimensional_local_copies_the_whole_image_including_the_vector() {
+    // The index vector is part of the array's storage, so declloc()'s memcopy
+    // covers calc_arraysize() cells, not just the elements.
+    let unit = compile("foo() { new a[2][3] = {{1,2,3},{4,5,6}}; }");
+    assert_eq!(unit.data, vec![8, 16, 1, 2, 3, 4, 5, 6], "the literal block is the full image");
+    let items = body("foo() { new a[2][3] = {{1,2,3},{4,5,6}}; }");
+    assert_eq!(first_imm(&items, Opcode::Stack), -8 * 4, "calc_arraysize of [2][3] is 8 cells");
+    assert_eq!(first_imm(&items, Opcode::Movs), 8 * 4, "all 8 cells are copied");
+}
+
+#[test]
+fn a_local_multidimensional_array_without_an_initialiser_still_writes_its_vector() {
+    let unit = compile("foo() { new a[2][3]; }");
+    assert_eq!(unit.data, vec![8, 16], "the vector alone becomes the literal block");
+    let ops = opcodes(&unit.code);
+    let fill = ops.iter().position(|o| *o == Opcode::Fill).expect("zero-fill first");
+    let movs = ops.iter().position(|o| *o == Opcode::Movs).expect("then the vector");
+    assert!(fill < movs, "{ops:?}");
 }
 
 #[test]
