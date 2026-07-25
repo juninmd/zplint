@@ -265,6 +265,7 @@ impl Generator {
     /// global name, so forward references resolve. The C compiler gets this for
     /// free by running the parser twice (`sc_status == statFIRST` then `statWRITE`).
     fn collect(&mut self, program: &Program) {
+        self.setconstants();
         for item in &program.items {
             match item {
                 Item::Func(f) => self.collect_func(f),
@@ -273,6 +274,42 @@ impl Generator {
                 Item::Enum(e) => self.collect_enum(e),
                 _ => {}
             }
+        }
+    }
+
+    /// `setconstants()` (sc1.c:1513): the constants the compiler defines before
+    /// reading a single line of source. Without these, `cellmin` and friends are
+    /// undefined symbols - and they are used inside `float.inc`'s own operator
+    /// bodies, so every plugin that touches floats fails.
+    ///
+    /// Values are for the 32-bit cell build with `sCHARBITS == 8`, which is the
+    /// only configuration AMX Mod X ships.
+    fn setconstants(&mut self) {
+        let bool_tag = self.intern_tag("bool");
+        let span = Span::default();
+
+        // `true`/`false` carry the bool tag; the rest are untagged.
+        self.define_const_tagged("true", 1, bool_tag, span);
+        self.define_const_tagged("false", 0, bool_tag, span);
+
+        for (name, value) in [
+            ("EOS", 0),
+            ("cellbits", 32),
+            ("cellmax", i32::MAX),
+            ("cellmin", i32::MIN),
+            ("charbits", 8),
+            ("charmin", 0),
+            // `~(-1UL << sCHARBITS) - 1` = 0xFF - 1
+            ("charmax", 254),
+            // `(1 << (sizeof(cell)-1)*8) - 1` = (1 << 24) - 1
+            ("ucharmax", 16_777_215),
+            // `debug` reflects the -d level; a release build compiles with 0.
+            ("debug", 0),
+            // `__LINE__` is seeded to 0 here and rewritten per line by the
+            // preprocessor, which already substitutes it textually.
+            ("__LINE__", 0),
+        ] {
+            self.define_const_tagged(name, value, TagId::UNTAGGED, span);
         }
     }
 
