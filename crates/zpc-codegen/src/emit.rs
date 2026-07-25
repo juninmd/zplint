@@ -765,14 +765,41 @@ impl Generator {
                 None => 0,
             })
             .collect();
-        // `new a[] = {1,2,3}` deduces the last dimension from the initialiser.
-        if let (Some(0), Some(init)) = (dims.last().copied(), d.init.as_ref()) {
-            let n = self.init_len(init);
-            if let Some(last) = dims.last_mut() {
-                *last = n;
+        // `initials()` deduces EVERY unsized dimension from the initialiser, not
+        // just the last one: `new const t[][][Field] = {{{1,2},{3,4}}, ...}` gets
+        // both leading dimensions from the nesting. Deducing only the last left
+        // the others at 0, so `sizeof t[]` folded to 0 and a `case 1 .. sizeof t[]:`
+        // became an invalid range.
+        if let Some(init) = d.init.as_ref() {
+            for level in 0..dims.len() {
+                if dims[level] != 0 {
+                    continue;
+                }
+                if let Some(n) = self.init_len_at(init, level) {
+                    dims[level] = n;
+                }
             }
         }
         VarKind::Array(dims)
+    }
+
+    /// Element count of the initialiser at nesting `level`: level 0 is the outermost
+    /// brace, level 1 its first sub-list, and so on. `None` when the initialiser is
+    /// not nested that deep, which leaves the dimension unknown rather than guessing.
+    ///
+    /// Only the *first* sub-list is measured at each level - a ragged initialiser is
+    /// a different matter (error 47), reported elsewhere.
+    fn init_len_at(&mut self, init: &Init, level: usize) -> Option<i32> {
+        if level == 0 {
+            return Some(self.init_len(init));
+        }
+        match init {
+            Init::List(l) => {
+                let first = l.elems.first()?;
+                self.init_len_at(first, level - 1)
+            }
+            Init::Expr(_) => None,
+        }
     }
 
     fn init_len(&mut self, init: &Init) -> i32 {
