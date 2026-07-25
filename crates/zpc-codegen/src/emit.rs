@@ -121,6 +121,9 @@ pub struct Generator {
     /// Native names in the order their `sysreq.c` indices were handed out.
     pub(crate) natives: Vec<String>,
     pub(crate) publics: Vec<(String, LabelId)>,
+    /// Every identifier named anywhere outside a `stock` body. A `stock` whose
+    /// name never appears there is not emitted - see [`Generator::function`].
+    pub(crate) referenced: std::collections::HashSet<String>,
 }
 
 impl Generator {
@@ -148,6 +151,7 @@ impl Generator {
             goto_labels: HashMap::new(),
             natives: Vec::new(),
             publics: Vec::new(),
+            referenced: std::collections::HashSet::new(),
         };
         // `#pragma rational Float` in float.inc. Registering it up front is what
         // stops the folder from constant-folding `1.0 + 2.0` into an *integer*
@@ -266,6 +270,7 @@ impl Generator {
     /// free by running the parser twice (`sc_status == statFIRST` then `statWRITE`).
     fn collect(&mut self, program: &Program) {
         self.setconstants();
+        self.referenced = collect_referenced_names(program);
         for item in &program.items {
             match item {
                 Item::Func(f) => self.collect_func(f),
@@ -961,6 +966,22 @@ impl Generator {
     /// `return`.
     fn function(&mut self, f: &FuncDecl) {
         let Some(body) = &f.body else { return };
+
+        // An unreferenced `stock` is never code-generated: `reduce_referrers()`
+        // and `testsymbols()` (sc1.c) drop `uSTOCK` symbols that were never read,
+        // and `sc_status` skips their bodies. That is not an optimisation - it is
+        // what lets a library header define stocks calling natives the plugin
+        // never includes. `tsx.inc`'s `ts_weaponspawn()` calls `create_entity()`
+        // from `engine.inc`, which nothing in the chain includes; amxxpc compiles
+        // those plugins precisely because the stock is unused, and emitting the
+        // body made us report 14 spurious undefined-symbol errors.
+        if f.modifiers.stock
+            && let FuncName::Ident(id) = &f.name
+            && !self.referenced.contains(&id.name)
+        {
+            return;
+        }
+
         let name = match &f.name {
             FuncName::Ident(id) => id.name.clone(),
             // `collect_func()` stored the overload under its mangled name; if it
@@ -1056,6 +1077,194 @@ impl Generator {
 
 /// Gather every `new` declarator in a body and the name of the first
 /// `return <ident>;`. Used only by [`Generator::infer_return_dims`].
+/// Every identifier named anywhere in the unit *except* inside an unreferenced
+/// `stock` body, plus the names of non-`stock` functions themselves.
+///
+/// Used to decide which `stock`s to emit. This is deliberately a fixed point over
+/// two rounds rather than a full reachability analysis: round one collects from
+/// non-`stock` code, round two adds anything named by the `stock`s that survived,
+/// which covers the one case that matters in practice - a used stock calling
+/// another stock. A deeper chain keeps more than upstream would, which costs dead
+/// code but never drops something that is needed.
+fn collect_referenced_names(program: &Program) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+
+    let mut names: HashSet<String> = HashSet::new();
+    // Seed with everything outside stock bodies.
+    for item in &program.items {
+        match item {
+            Item::Func(f) if f.modifiers.stock => {}
+            other => collect_names_in_item(other, &mut names),
+        }
+    }
+    // Two rounds of closure over the stocks that are now live.
+    for _ in 0..2 {
+        let live: Vec<&Item> = program
+            .items
+            .iter()
+            .filter(|i| match i {
+                Item::Func(f) => {
+                    f.modifiers.stock
+                        && matches!(&f.name, FuncName::Ident(id) if names.contains(&id.name))
+                }
+                _ => false,
+            })
+            .collect();
+        for item in live {
+            collect_names_in_item(item, &mut names);
+        }
+    }
+    names
+}
+
+fn collect_names_in_init(init: &Init, out: &mut std::collections::HashSet<String>) {
+    match init {
+        Init::Expr(e) => collect_names_in_expr(e, out),
+        Init::List(l) => {
+            for e in &l.elems {
+                collect_names_in_init(e, out);
+            }
+        }
+    }
+}
+
+fn collect_names_in_var(v: &VarDecl, out: &mut std::collections::HashSet<String>) {
+    for d in &v.declarators {
+        for dim in &d.dims {
+            if let Some(e) = &dim.size {
+                collect_names_in_expr(e, out);
+            }
+        }
+        if let Some(init) = &d.init {
+            collect_names_in_init(init, out);
+        }
+    }
+}
+
+fn collect_names_in_item(item: &Item, out: &mut std::collections::HashSet<String>) {
+    match item {
+        // A global initialiser may name a function used as a callback.
+        Item::Var(v) => collect_names_in_var(v, out),
+        Item::Const(c) => collect_names_in_expr(&c.value, out),
+        Item::Enum(e) => {
+            for m in &e.members {
+                if let Some(v) = &m.value {
+                    collect_names_in_expr(v, out);
+                }
+            }
+        }
+        _ => {}
+    }
+    if let Item::Func(f) = item {
+        // An operator overload is reached through dispatch, never by name.
+        if matches!(f.name, FuncName::Operator { .. }) {
+            out.insert("operator".to_string());
+        }
+        for p in &f.params {
+            if let AstParam::Fixed(d) = p
+                && let Some(ParamDefault::Symbol(id)) = &d.default
+            {
+                out.insert(id.name.clone());
+            }
+        }
+        if let Some(body) = &f.body {
+            collect_names_in_stmts(&body.stmts, out);
+        }
+    }
+}
+
+fn collect_names_in_stmts(
+    stmts: &[zpc_ast::stmt::Stmt],
+    out: &mut std::collections::HashSet<String>,
+) {
+    use zpc_ast::stmt::{ForInit, Stmt};
+    for s in stmts {
+        match s {
+            Stmt::Expr { expr, .. } | Stmt::Return { value: Some(expr), .. } => {
+                collect_names_in_expr(expr, out)
+            }
+            Stmt::Var(v) => collect_names_in_var(v, out),
+            Stmt::Const(c) => collect_names_in_expr(&c.value, out),
+            // Anything else that can carry an expression. Missing one of these
+            // would drop a stock that IS called, so the arms below are
+            // deliberately generous rather than minimal.
+            Stmt::Exit { value: Some(e), .. } => collect_names_in_expr(e, out),
+            Stmt::Block(b) => collect_names_in_stmts(&b.stmts, out),
+            Stmt::If { cond, then_branch, else_branch, .. } => {
+                collect_names_in_expr(cond, out);
+                collect_names_in_stmts(std::slice::from_ref(then_branch.as_ref()), out);
+                if let Some(e) = else_branch {
+                    collect_names_in_stmts(std::slice::from_ref(e.as_ref()), out);
+                }
+            }
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
+                collect_names_in_expr(cond, out);
+                collect_names_in_stmts(std::slice::from_ref(body.as_ref()), out);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(ForInit::Expr(e)) = init {
+                    collect_names_in_expr(e, out);
+                }
+                if let Some(c) = cond {
+                    collect_names_in_expr(c, out);
+                }
+                if let Some(st) = step {
+                    collect_names_in_expr(st, out);
+                }
+                collect_names_in_stmts(std::slice::from_ref(body.as_ref()), out);
+            }
+            Stmt::Switch { scrutinee, cases, default, .. } => {
+                collect_names_in_expr(scrutinee, out);
+                for c in cases {
+                    collect_names_in_stmts(std::slice::from_ref(&c.body), out);
+                }
+                if let Some(d) = default {
+                    collect_names_in_stmts(std::slice::from_ref(d.as_ref()), out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_names_in_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    match &e.kind {
+        ExprKind::Ident(id) => {
+            out.insert(id.name.clone());
+        }
+        ExprKind::Call { callee, args, .. } => {
+            collect_names_in_expr(callee, out);
+            for a in args {
+                if let zpc_ast::expr::ArgValue::Expr(x) = &a.value {
+                    collect_names_in_expr(x, out);
+                }
+            }
+        }
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Assign { target: lhs, value: rhs, .. } => {
+            collect_names_in_expr(lhs, out);
+            collect_names_in_expr(rhs, out);
+        }
+        ExprKind::Unary { operand, .. }
+        | ExprKind::IncDec { operand, .. }
+        | ExprKind::Cast { expr: operand, .. } => collect_names_in_expr(operand, out),
+        ExprKind::Index { base, index, .. } => {
+            collect_names_in_expr(base, out);
+            collect_names_in_expr(index, out);
+        }
+        ExprKind::Ternary { cond, then_expr, else_expr, .. } => {
+            collect_names_in_expr(cond, out);
+            collect_names_in_expr(then_expr, out);
+            collect_names_in_expr(else_expr, out);
+        }
+        ExprKind::Comma { exprs, .. } => {
+            for x in exprs {
+                collect_names_in_expr(x, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_return_shape(
     stmts: &[zpc_ast::stmt::Stmt],
     decls: &mut Vec<Declarator>,
@@ -1124,6 +1333,8 @@ mod tests {
         assert_eq!(g.string_cells(&s), vec![0x6162_6364u32 as i32, 0]);
     }
 }
+
+
 
 
 
