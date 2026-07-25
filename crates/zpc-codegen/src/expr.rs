@@ -902,9 +902,19 @@ impl Generator {
             }
             ParamKind::Array => {
                 let v = self.eval(e);
-                if !matches!(v, Val::ArrayRef) {
-                    self.error(35, e.span, &[]);
-                    self.rvalue(&v);
+                // `case iREFARRAY:` (sc3.c:2078) accepts iARRAY, iREFARRAY **and
+                // iARRAYCELL**. The last one is how Pawn passes a sub-array:
+                // `copy(dest, len, text[pos])` hands over the address of element
+                // `pos` onward, and the AMXX headers rely on it heavily
+                // (string_stocks.inc alone does it eleven times). `eval` has
+                // already left that address in PRI, so there is nothing to emit -
+                // rejecting it was the bug.
+                match v {
+                    Val::ArrayRef | Val::ArrayCell | Val::ArrayChar => {}
+                    other => {
+                        self.error(35, e.span, &[]);
+                        self.rvalue(&other);
+                    }
                 }
             }
             ParamKind::VarArgs => {
