@@ -676,7 +676,11 @@ impl Generator {
         tag: TagId,
         span: Span,
     ) {
-        self.table.declare(SymbolDecl::new(name, SymKind::Constant, span));
+        // Same reason variables need it: a constant declaration IS its definition,
+        // and the folder rejects a symbol that is merely announced.
+        self.table.declare(
+            SymbolDecl::new(name, SymKind::Constant, span).with_usage(Usage::DEFINED),
+        );
         self.fold_env =
             std::mem::take(&mut self.fold_env).with_const(name, value, tag.raw() as i32);
         self.env.declare_const(name, value);
