@@ -752,6 +752,7 @@ dependencies = [
  "walkdir",
  "zpc-amxx",
  "zpc-asm",
+ "zpc-ast",
  "zpc-codegen",
  "zpc-diag",
  "zpc-lex",

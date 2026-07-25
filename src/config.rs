@@ -58,6 +58,10 @@ pub struct RulesConfig {
     #[serde(default = "true_val")] pub zp_infect_lasthuman_survivor: bool,
     /// Rule ids from detectors.rs to turn off (they are on by default).
     #[serde(default)] pub disable: Vec<String>,
+    /// Route `ast_lint::MIGRATED_RULES` through the zpc parser when the file
+    /// parses cleanly. Files that do not parse always fall back to the regex
+    /// engine, so turning this off only costs precision, never coverage.
+    #[serde(default = "true_val")] pub ast: bool,
 }
 
 impl RulesConfig {
@@ -110,6 +114,7 @@ impl Default for RulesConfig {
             fopen_close: true,
             zp_infect_lasthuman_survivor: true,
             disable: Vec::new(),
+            ast: true,
         }
     }
 }

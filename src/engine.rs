@@ -65,9 +65,29 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         Err(_) => return vec![],
     };
 
+    // AST path first: if the file parses through the zpc front-end, the migrated
+    // rules are answered from the parse tree and suppressed in the regex pass
+    // below. A file that does not parse silently keeps the regex behaviour, so a
+    // parser gap can never remove or invent a diagnostic.
+    let mut ast_issues = Vec::new();
+    let ast_config;
+    let config = if config.ast
+        && let Some(found) = crate::ast_lint::lint(filepath, &raw, config)
+    {
+        ast_issues = found;
+        let mut narrowed = config.clone();
+        narrowed
+            .disable
+            .extend(crate::ast_lint::MIGRATED_RULES.iter().map(|r| r.to_string()));
+        ast_config = narrowed;
+        &ast_config
+    } else {
+        config
+    };
+
     let raw_clean = strip_block_comments(&raw);
     let lines_clean: Vec<&str> = raw_clean.split('\n').collect();
-    let mut issues = Vec::new();
+    let mut issues = ast_issues;
     // Track message_begin nesting for rule: nested_message
     let mut _msg_begin_lineno: usize = 0;
     let mut msg_nesting = 0i32;

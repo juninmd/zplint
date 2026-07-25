@@ -172,6 +172,24 @@ e testadas, mas **não validadas contra o oráculo** (ver bloqueadores).
   que é a forma correta de comparar saída, já que bytes de `.amxx` divergem por zlib.
 - `crates/zpc/tests/fixtures/` — Pawn escrito à mão cobrindo as armadilhas conhecidas.
 
+### Fase G — caminho de lint sobre a AST (primeiro corte)
+
+`src/ast_lint.rs` reusa `zpc-lex` + `zpc-parse` e responde 3 regras a partir da
+árvore: `empty_statement`, `string_literal_compare`, `comparison_as_statement`
+(mesmos `rule_id`, mesma severidade, mesmo `rules.disable`). Ligado por padrão,
+desligável com `[rules] ast = false`.
+
+- **Falha de parse nunca vira erro de lint.** `ast_lint::lint` devolve `None` e o
+  arquivo inteiro cai no motor regex. `#include` é apagado antes do preproc (o
+  diagnóstico 100 é *fatal* e truncaria o arquivo).
+- **Taxa de parse limpo**: 48/74 (64,9%) nos plugins oficiais, 1428/1630 (87,6%)
+  no corpus real.
+- **`zplint ast-compare <arquivos>`** roda os dois caminhos e lista divergência
+  por regra/linha. Hoje: 0 divergências nos dois corpora, contagens idênticas.
+- `else_paren` **não** migrou: `else (cond) { }` não parseia (erro 1 + 54), então
+  a AST nunca veria o bug. Volta a ser candidata quando o parser tiver recuperação
+  de erro melhor.
+
 ### Bloqueadores
 1. **Sem `amxxpc.exe`** → o oráculo não roda. É o item de maior risco do projeto:
    sem ele, "paridade" é afirmação não verificada.

@@ -20,6 +20,7 @@ anyhow = "1"
 rayon = "1"
 zpc-amxx = { path = "crates/zpc-amxx" }
 zpc-asm = { path = "crates/zpc-asm" }
+zpc-ast = { path = "crates/zpc-ast" }
 zpc-lex = { path = "crates/zpc-lex" }
 zpc-parse = { path = "crates/zpc-parse" }
 zpc-codegen = { path = "crates/zpc-codegen" }

@@ -482,12 +482,19 @@ fn collect_calls(sanitized: &[String], local: &HashSet<String>) -> Vec<Call> {
                 i += 1;
                 continue;
             }
-            if !(c.is_alphabetic() || c == '_') {
+            // Identifier characters must be tested as ASCII. `bytes[i] as char`
+            // reinterprets a byte >= 0x80 as the Latin-1 codepoint of the same
+            // value, and several of those (0xE9 = 'e-acute', for instance) are
+            // alphanumeric - so `i` would advance into the middle of a UTF-8
+            // sequence and the `&san[start..i]` slice below would panic on a
+            // non-char-boundary. Pawn identifiers are ASCII anyway (`alpha()` in
+            // sc2.c accepts only a-z, A-Z, `_` and `@`).
+            if !(c.is_ascii_alphabetic() || c == '_') {
                 i += 1;
                 continue;
             }
             let start = i;
-            while i < bytes.len() && ((bytes[i] as char).is_alphanumeric() || bytes[i] == b'_') {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             let name = &san[start..i];
@@ -662,6 +669,20 @@ mod tests {
         assert_eq!(near_miss_const("PLUGIN_CONTNIUE"), Some("PLUGIN_CONTINUE"));
         // same edit distance but different prefix family - not a suggestion
         assert!(near_miss_const("XYZ_ABCDEF").is_none());
+    }
+
+    #[test]
+    fn non_ascii_source_does_not_panic() {
+        // Legacy .sma files are frequently Windows-1252, so bytes >= 0x80 reach
+        // the scanner. Treating them as identifier characters used to walk `i`
+        // into the middle of a UTF-8 sequence and panic on the slice, killing the
+        // whole parallel lint run rather than just the one file.
+        let src = "#include <amxmodx>\npublic plugin_init()\n{\n\tnew msg[] = \"cão órfão\"\n\tserver_print(msg)\n}\n";
+        let _ = lint(src);
+
+        // Accented characters directly adjacent to a call must not derail it either.
+        let src2 = "#include <amxmodx>\npublic plugin_init()\n{\n\t// açúcar\n\tnew n[32]\n\tget_user_name(1, n)\n}\n";
+        assert!(lint(src2).contains(&"api_arity"), "the call must still be found");
     }
 
     #[test]
