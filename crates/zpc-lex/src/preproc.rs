@@ -85,8 +85,14 @@ fn at(b: &[u8], i: usize) -> u8 {
 /// character, which the scanner must have to lex string literals correctly.
 #[derive(Clone, Debug)]
 pub struct PreprocState {
-    /// `#pragma ctrlchar` - the escape character inside literals. The scanner reads this.
+    /// `#pragma ctrlchar` - the escape character inside literals. This is the
+    /// value in effect at the END of the unit; for scanning, use
+    /// [`PreprocState::ctrlchar_changes`], because the setting is positional.
     pub ctrlchar: u8,
+    /// Every `#pragma ctrlchar`, as `(0-based output line, new character)` in
+    /// source order. The scanner applies each one as it reaches that line, which
+    /// is what makes a change affect only the text after it.
+    pub ctrlchar_changes: Vec<(u32, u8)>,
     /// `#pragma semicolon` - when true, statements must end with `;`.
     pub semicolon: bool,
     /// `#pragma tabsize`.
@@ -130,6 +136,7 @@ impl Default for PreprocState {
             unused: Vec::new(),
             align_next: false,
             stack_usage_info: false,
+            ctrlchar_changes: Vec::new(),
         }
     }
 }
@@ -949,6 +956,15 @@ impl Preprocessor {
                     }
                     tail = arg[j..].to_vec();
                 }
+                // The control character is POSITIONAL: amxxpc interleaves
+                // preprocessing and lexing, so a change applies from here on and
+                // leaves everything already read alone. Record where it happened
+                // (0-based output line) so the scanner can switch at the same
+                // point instead of being handed one value for the whole file -
+                // which made a plugin's `#pragma ctrlchar '\'` retroactively
+                // re-read every header that was written for '^'.
+                let line = self.map.len() as u32;
+                self.state.ctrlchar_changes.push((line, self.state.ctrlchar));
             }
             "codepage" => {
                 let mut j = skip_ws(arg, 0);
@@ -2325,3 +2341,4 @@ mod tests {
         }
     }
 }
+

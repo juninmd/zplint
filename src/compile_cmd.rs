@@ -37,10 +37,12 @@ pub fn run(path: &Path, out: Option<PathBuf>, include_dirs: Vec<PathBuf>, emit_a
         return 1;
     }
 
-    let mut scanner = zpc_lex::Scanner::new(&pre.text, path);
-    scanner.set_ctrl_char(pre.state.ctrlchar);
+    // `#pragma ctrlchar` is positional, so the scanner switches at the lines where
+    // the changes occurred rather than being handed one value for the whole unit.
+    let scanner = zpc_lex::Scanner::new(&pre.text, path);
     let mut scan_diags = Diagnostics::new();
-    let tokens = scanner.scan(&mut scan_diags);
+    let tokens =
+        scanner.scan_with_ctrl_changes(&pre.state.ctrlchar_changes, &mut scan_diags);
     merge(&mut all, scan_diags.into_items());
     if report_and_stop(&all, &pre.text, path, Some(&pre.map)) {
         return 1;
@@ -216,5 +218,6 @@ fn print_summary(all: &Diagnostics, outcome: Outcome, bytes: usize) {
     }
     let _ = Severity::Error;
 }
+
 
 

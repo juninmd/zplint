@@ -64,9 +64,44 @@ impl<'a> Scanner<'a> {
     }
 
     /// Scan the whole buffer. The returned vector always ends with [`TokenKind::Eof`].
-    pub fn scan(mut self, diags: &mut Diagnostics) -> Vec<Token> {
+    pub fn scan(self, diags: &mut Diagnostics) -> Vec<Token> {
+        self.scan_with_ctrl_changes(&[], diags)
+    }
+
+    /// Scan, applying `#pragma ctrlchar` changes at the lines where they occurred.
+    ///
+    /// `changes` is `(0-based line, new character)` in source order, as collected
+    /// by the preprocessor. The setting is positional: amxxpc interleaves
+    /// preprocessing and lexing, so a change affects only what follows it. Scanning
+    /// the whole expanded text with one value instead makes a plugin's
+    /// `#pragma ctrlchar '\'` retroactively re-read every header written for `^`.
+    pub fn scan_with_ctrl_changes(
+        mut self,
+        changes: &[(u32, u8)],
+        diags: &mut Diagnostics,
+    ) -> Vec<Token> {
         let mut out = Vec::new();
+        let mut next_change = 0usize;
+        let mut line = 0u32;
+        let mut seen = 0usize;
+
         loop {
+            // Count the newlines crossed since the last token and apply any change
+            // whose line we have now reached.
+            // `self.pos` may run one past the end - the scanner reads through a
+            // virtual NUL sentinel - so clamp before indexing.
+            let upto = self.pos.min(self.src.len());
+            while seen < upto {
+                if self.src[seen] == b'\n' {
+                    line += 1;
+                }
+                seen += 1;
+            }
+            while next_change < changes.len() && changes[next_change].0 <= line {
+                self.ctrl_char = changes[next_change].1;
+                next_change += 1;
+            }
+
             let tok = self.next_token(diags);
             let done = tok.kind == TokenKind::Eof;
             out.push(tok);
