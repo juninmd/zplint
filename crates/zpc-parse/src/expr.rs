@@ -95,7 +95,23 @@ impl<'a> Parser<'a> {
     /// [`Parser::parse_expr`]. Statement parsing should prefer this entry point;
     /// using `parse_expr` merely loses the paren-less form, it never misparses.
     pub fn parse_expr_stmt(&mut self) -> Expr {
-        self.hier14(Ctx { allow_proccall: true, ..Ctx::top() })
+        let start = self.cur_span();
+        let first = self.hier14(Ctx { allow_proccall: true, ..Ctx::top() });
+
+        // `expression()` (sc3.c) is `hier14()` followed by a loop on `,` - the
+        // comma operator, which at statement position chains several expressions
+        // into one statement: `f(1), f(2), f(3);`. Only a *declaration's*
+        // initialiser stops at hier14, which is what keeps `new a = 1, b = 2`
+        // parsing as two declarators; that path uses `parse_expr`, not this one.
+        if !self.at(&TokenKind::Comma) {
+            return first;
+        }
+        let mut exprs = vec![first];
+        while self.eat(&TokenKind::Comma) {
+            exprs.push(self.hier14(Ctx { allow_proccall: true, ..Ctx::top() }));
+        }
+        let span = start.to(self.prev_span());
+        Expr { kind: ExprKind::Comma { exprs, span }, span }
     }
 
     // ============================================================== hier14

@@ -33,7 +33,7 @@ pub fn run(path: &Path, out: Option<PathBuf>, include_dirs: Vec<PathBuf>, emit_a
     let mut pp = zpc_lex::Preprocessor::new(include_dirs);
     let (pre, pp_diags) = pp.process(path, &src);
     merge(&mut all, pp_diags.into_items());
-    if report_and_stop(&all, &pre.text, path) {
+    if report_and_stop(&all, &pre.text, path, Some(&pre.map)) {
         return 1;
     }
 
@@ -42,21 +42,21 @@ pub fn run(path: &Path, out: Option<PathBuf>, include_dirs: Vec<PathBuf>, emit_a
     let mut scan_diags = Diagnostics::new();
     let tokens = scanner.scan(&mut scan_diags);
     merge(&mut all, scan_diags.into_items());
-    if report_and_stop(&all, &pre.text, path) {
+    if report_and_stop(&all, &pre.text, path, Some(&pre.map)) {
         return 1;
     }
 
     // --- phase B: parse ---
     let (program, parse_diags) = zpc_parse::parse(&pre.text, &tokens, path);
     merge(&mut all, parse_diags.into_items());
-    if report_and_stop(&all, &pre.text, path) {
+    if report_and_stop(&all, &pre.text, path, Some(&pre.map)) {
         return 1;
     }
 
     // --- phase D: generate code ---
     let unit = zpc_codegen::Generator::new(path).program(&program);
     merge(&mut all, take_diags(&unit));
-    if report_and_stop(&all, &pre.text, path) {
+    if report_and_stop(&all, &pre.text, path, Some(&pre.map)) {
         return 1;
     }
 
@@ -96,7 +96,7 @@ pub fn run(path: &Path, out: Option<PathBuf>, include_dirs: Vec<PathBuf>, emit_a
     let dest = out.unwrap_or_else(|| path.with_extension("amxx"));
     match std::fs::write(&dest, &amxx) {
         Ok(()) => {
-            report(&all, &pre.text, path);
+            report(&all, &pre.text, path, Some(&pre.map));
             print_summary(&all, Outcome::Wrote(dest), amxx.len());
             0
         }
@@ -156,21 +156,43 @@ fn merge(all: &mut Diagnostics, items: impl IntoIterator<Item = zpc_diag::Diagno
 }
 
 /// Print diagnostics in amxxpc's format so output can be diffed against it.
-fn report(all: &Diagnostics, text: &str, path: &Path) {
+///
+/// Spans point into the PREPROCESSED text, so a raw `LineIndex` over it reports
+/// positions like `plugin.sma(12930)` for a 700-line file - useless to a human and
+/// to a differential diff alike. `LineMap` maps each expanded line back to the file
+/// and line it came from, which is the whole reason the preprocessor builds it.
+fn report(all: &Diagnostics, text: &str, path: &Path, map: Option<&zpc_lex::preproc::LineMap>) {
     let index = LineIndex::new(text);
     for d in all.items() {
-        let _ = path;
-        eprintln!("{}", AmxxpcStyle { diag: d, index: &index });
+        let (expanded_line, _) = index.line_col(d.span.start);
+        match map.and_then(|m| m.origin(expanded_line as usize - 1)) {
+            Some((origin, line)) => {
+                eprintln!(
+                    "{}({}) : {} {:03}: {}",
+                    origin.display(),
+                    line,
+                    d.severity.as_str(),
+                    d.code,
+                    d.message
+                );
+            }
+            // No map (or a synthetic span): fall back to the raw position rather
+            // than dropping the diagnostic.
+            None => {
+                let _ = path;
+                eprintln!("{}", AmxxpcStyle { diag: d, index: &index });
+            }
+        }
     }
 }
 
 /// Report, then say whether compilation must stop. Errors stop the pipeline;
 /// warnings do not.
-fn report_and_stop(all: &Diagnostics, text: &str, path: &Path) -> bool {
+fn report_and_stop(all: &Diagnostics, text: &str, path: &Path, map: Option<&zpc_lex::preproc::LineMap>) -> bool {
     if all.error_count() == 0 && !all.aborted() {
         return false;
     }
-    report(all, text, path);
+    report(all, text, path, map);
     print_summary(all, Outcome::Failed, 0);
     true
 }
@@ -194,4 +216,5 @@ fn print_summary(all: &Diagnostics, outcome: Outcome, bytes: usize) {
     }
     let _ = Severity::Error;
 }
+
 

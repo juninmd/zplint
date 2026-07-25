@@ -153,7 +153,10 @@ impl Parser<'_> {
             // lets `foo;` and `client_print id, 0, "hi"` be calls; recording that is
             // the expression parser's job.
             _ => {
-                let expr = self.parse_expr();
+                // Statement position: this is the entry point that enables the
+                // paren-less call form AND the comma operator, both of which
+                // `parse_expr` deliberately excludes.
+                let expr = self.parse_expr_stmt();
                 self.eat_terminator();
                 Stmt::Expr { expr, span: start.to(self.prev_span()) }
             }
