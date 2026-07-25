@@ -101,3 +101,25 @@ Não são divergências com o amxxpc — são casos em que **nós** estávamos e
 | o enum `OP_*` tem aridade inferível pelo nome | Vem da função de emissão que cada linha do `opcodelist[]` referencia (`parm0`/`parm1`/`parm2`); `casetbl` é variável (`2+2n` células). |
 | função retorna array como `Float:make()[3]` (afirmado na doc da AST) | **Errado.** `newfunc()` (definição) vai direto para `if (!matchtoken('('))` — não tem loop de dims. Só `funcstub()` (native/forward) tem `while (matchtoken('['))`, e **antes** do nome: `native Float:[3] make_vec();`. Logo `return_dims` só é populado para native/forward. |
 
+
+---
+
+## 5. Os 2 plugins oficiais que o `zpc` não compila — e por quê
+
+`ts/stats.sma` e `ts/stats_logging.sma` falham com 14× erro 017 (`create_entity`,
+`DispatchKeyValue` indefinidos).
+
+**Não é bug do `zpc`.** `tsx.inc` usa essas natives mas inclui apenas `tsstats`;
+nem ele nem os dois plugins incluem `engine.inc`, onde elas são declaradas
+(`engine.inc:615`). O header é auto-insuficiente como distribuído.
+
+**Prova**: adicionar uma única linha `#include <engine>` a cada plugin faz ambos
+compilarem sem nenhum erro. Ou seja, todo o resto desses plugins — que são dos
+maiores do conjunto — o `zpc` já processa corretamente.
+
+O amxxpc real falharia da mesma forma com este conjunto de includes. **Não
+verificável sem o binário de referência**: é possível que o build oficial do AMXX
+passe `-i` adicional ou que o módulo TS distribua um include próprio.
+
+Se essa leitura estiver certa, o `zpc` compila **72 de 72** plugins oficiais
+compiláveis.

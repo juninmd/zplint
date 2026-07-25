@@ -204,8 +204,8 @@ desligável com `[rules] ast = false`.
 
 | | início | fim |
 |---|---|---|
-| plugins que compilam | **0 / 74** | **71 / 74 (96%)** |
-| erros de compilação | 8476 | **15** |
+| plugins que compilam | **0 / 74** | **72 / 74 (97%)** — os 2 restantes são um header auto-insuficiente, ver abaixo |
+| erros de compilação | 8476 | **14**, todos do mesmo `tsx.inc` |
 | testes do workspace | 555 | 649, 0 falhas |
 | baseline do linter | 0 erros | 0 erros (mantido) |
 
@@ -229,7 +229,7 @@ Cada uma diagnosticada na fonte C, com o erro que dominava antes:
 Padrão observado: milhares de erros vinham de poucos descuidos pontuais, quase sempre
 uma linha. O maior salto isolado foi o #8.
 
-### Os 3 plugins restantes
+### Os 2 plugins restantes
 
 Casos individuais, não mais padrões sistêmicos: 5× erro 001 (parser), 5× erro 008,
 1× 050 (range), 1× 027 (char constant), e `create_entity`/`DispatchKeyValue` indefinidos
@@ -243,5 +243,6 @@ Os 66 `.amxx` gerados são estruturalmente válidos e passam pelo nosso próprio
 mas **nenhum foi carregado num servidor**, e **nenhuma saída foi comparada com o amxxpc**.
 "Melhor que o amxxpc" está apoiado em 6 bugs do compilador original encontrados e corrigidos
 (ver `docs/DIVERGENCES.md` §1) — não em medição de paridade.
+
 
 
