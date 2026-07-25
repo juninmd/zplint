@@ -994,6 +994,21 @@ impl Preprocessor {
                 if !lib.is_empty() && lib != "-" {
                     self.state.libraries.push(format!("{prefix}{lib}"));
                 }
+                // These pragmas take an OPTIONAL second name - sc2.c reads `name`
+                // and then `sname` before skipping to end of line. Reporting the
+                // second one as "extra characters" (38) broke every header using
+                // `#pragma defclasslib xstats csx`, which is the AMXX autoload
+                // idiom and appears in csx.inc, cstrike.inc, fun.inc and others.
+                let mut k = skip_ws(arg, j);
+                let s2 = k;
+                while k < arg.len() && (alphanum(arg[k]) || arg[k] == b'-') {
+                    k += 1;
+                }
+                if k > s2 {
+                    let sname = String::from_utf8_lossy(&arg[s2..k]).into_owned();
+                    self.state.libraries.push(format!("{prefix}{sname}"));
+                    j = k;
+                }
                 tail = arg[j..].to_vec();
             }
             "rational" => {
