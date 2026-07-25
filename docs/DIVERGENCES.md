@@ -104,22 +104,19 @@ Não são divergências com o amxxpc — são casos em que **nós** estávamos e
 
 ---
 
-## 5. Os 2 plugins oficiais que o `zpc` não compila — e por quê
+## 5. Correção: uma afirmação errada minha, desfeita pelo oráculo
 
-`ts/stats.sma` e `ts/stats_logging.sma` falham com 14× erro 017 (`create_entity`,
-`DispatchKeyValue` indefinidos).
+Durante a migração eu afirmei que `ts/stats.sma` e `ts/stats_logging.sma` não compilavam
+porque `tsx.inc` seria **auto-insuficiente** — usa `create_entity`/`DispatchKeyValue` sem
+que nada na cadeia inclua `engine.inc` — e concluí que "o amxxpc falharia igual".
 
-**Não é bug do `zpc`.** `tsx.inc` usa essas natives mas inclui apenas `tsstats`;
-nem ele nem os dois plugins incluem `engine.inc`, onde elas são declaradas
-(`engine.inc:615`). O header é auto-insuficiente como distribuído.
+**Estava errado.** Rodando o `amxxpc` 1.10.0 de verdade: ele compila os dois sem nenhum erro.
 
-**Prova**: adicionar uma única linha `#include <engine>` a cada plugin faz ambos
-compilarem sem nenhum erro. Ou seja, todo o resto desses plugins — que são dos
-maiores do conjunto — o `zpc` já processa corretamente.
+A causa real: o `reduce_referrers()`/`testsymbols()` (`sc1.c`) descartam símbolos `uSTOCK`
+nunca lidos, e o corpo deles **nunca é compilado**. Não é otimização — é o que permite um
+header de biblioteca definir stocks que chamam natives que o plugin não inclui.
+`ts_weaponspawn()` é um stock que ninguém chama, então o amxxpc jamais resolve o
+`create_entity` dentro dele. Nós emitíamos o corpo e reportávamos 14 erros inventados.
 
-O amxxpc real falharia da mesma forma com este conjunto de includes. **Não
-verificável sem o binário de referência**: é possível que o build oficial do AMXX
-passe `-i` adicional ou que o módulo TS distribua um include próprio.
-
-Se essa leitura estiver certa, o `zpc` compila **72 de 72** plugins oficiais
-compiláveis.
+Lição que vale registrar: **"o compilador de referência também falharia" é uma hipótese,
+não uma conclusão** — e só vira conclusão rodando o compilador de referência.

@@ -198,51 +198,62 @@ desligável com `[rules] ast = false`.
 
 ---
 
-## 9. Resultado medido (fim da sessão de migração)
+## 9. Resultado medido
 
-`zplint compile` nos 74 plugins oficiais do `alliedmodders/amxmodx`:
+`zplint compile` nos 74 plugins oficiais do `alliedmodders/amxmodx`, com o `amxxpc` 1.10.0
+como oráculo:
 
 | | início | fim |
 |---|---|---|
-| plugins que compilam | **0 / 74** | **72 / 74 (97%)** — os 2 restantes são um header auto-insuficiente, ver abaixo |
-| erros de compilação | 8476 | **14**, todos do mesmo `tsx.inc` |
+| plugins que compilam | **0 / 74** | **74 / 74** |
+| erros de compilação | 8476 | **0** |
 | testes do workspace | 555 | 649, 0 falhas |
 | baseline do linter | 0 erros | 0 erros (mantido) |
 
-### As 10 causas-raiz removidas
+**Paridade de aceitação atingida**: o `amxxpc` de referência também compila 74/74 com o
+mesmo conjunto de includes. Os dois compiladores aceitam exatamente o mesmo corpus.
 
-Cada uma diagnosticada na fonte C, com o erro que dominava antes:
+### As 16 causas-raiz removidas
 
-| # | Causa | Erro | Impacto |
-|---|-------|------|---------|
-| 1 | Quebra de linha tratada como fim de protótipo → todo corpo sem chaves quebrava | 010 | 1585 → 0 |
-| 2 | Operadores definidos pelo usuário sem despacho (+ propagação de tags) | 007 | 1947 → 0 |
-| 3 | Constantes predefinidas do `setconstants()` ausentes | 017 | −1135 |
-| 4 | `Usage::DEFINED` não setado → `sizeof` rejeitava variável válida | 008/017 | −958 |
-| 5 | Locais nunca entravam na symbol table → `charsmax` falhava | 008/017 | −2836 |
-| 6 | Sub-array como argumento (`copy(d, n, text[pos])`) recusado | 035 | 858 → 0 |
-| 7 | Default de array (`const s[] = ""`) contava como obrigatório | 088 | 3 → 20 plugins |
-| 8 | Cauda variádica vazia tratada como argumento faltante | 088 | 20 → 49 plugins |
-| 9 | Nome do enum não registrado como constante (`new d[PlayerData]`) | 008 | 49 → 56 plugins |
-| 10 | Pragmas de biblioteca com segundo nome (`#pragma defclasslib a b`) | 038 | 56 → 66 plugins |
+| # | Causa | Erro que dominava |
+|---|-------|-------------------|
+| 1 | Quebra de linha tratada como fim de protótipo → corpo sem chaves quebrava | 010 (1585) |
+| 2 | Operadores do usuário sem despacho + propagação de tags | 007 (1947) |
+| 3 | Constantes predefinidas do `setconstants()` ausentes | 017 |
+| 4 | `Usage::DEFINED` não setado → `sizeof` rejeitava variável válida | 008/017 |
+| 5 | Locais nunca entravam na symbol table → `charsmax` falhava | 008/017 (2836) |
+| 6 | Sub-array como argumento (`copy(d, n, text[pos])`) recusado | 035 (858) |
+| 7 | Default de array (`const s[] = ""`) contava como obrigatório | 088 |
+| 8 | Cauda variádica vazia tratada como argumento faltante | 088 (735) |
+| 9 | Nome do enum não registrado como constante | 008 |
+| 10 | Pragmas de biblioteca com segundo nome | 038 (13) |
+| 11 | Posições de diagnóstico apontavam para o texto expandido | — |
+| 12 | Operador vírgula em posição de statement | 001 |
+| 13 | Passada de inferência de retorno reportava erros especulativos | 008 |
+| 14 | `#pragma ctrlchar` tratado como valor único, não posicional | 027 |
+| 15 | Só a última dimensão era deduzida do inicializador | 050 |
+| 16 | **Stocks não referenciados eram compilados** | 017 (14) |
 
-Padrão observado: milhares de erros vinham de poucos descuidos pontuais, quase sempre
-uma linha. O maior salto isolado foi o #8.
+Padrão: milhares de erros vinham de descuidos pontuais, quase sempre uma linha. Os dois
+maiores saltos foram o #8 (20→49 plugins) e o #16 (72→74).
 
-### Os 2 plugins restantes
+### O que está provado e o que não está
 
-Casos individuais, não mais padrões sistêmicos: 5× erro 001 (parser), 5× erro 008,
-1× 050 (range), 1× 027 (char constant), e `create_entity`/`DispatchKeyValue` indefinidos
-em `dod/stats.sma` e `dod/stats_logging.sma` — este último possivelmente **não é bug nosso**:
-`dodx.inc` não inclui `engine.inc`, então o amxxpc real também falharia com este conjunto de
-includes. **Não verificável sem o `amxxpc.exe`.**
+**Provado**: paridade de *aceitação* — mesmo corpus, mesmo veredito, medido contra o
+binário de referência.
 
-### O que continua não provado
+**Não provado**: equivalência de *saída*. Os `.amxx` diferem em tamanho (codegen e
+cobertura de peephole diferentes; ver §3 de `DIVERGENCES.md`, que já previa isso).
+**Nenhum `.amxx` gerado por nós foi carregado num servidor CS 1.6.**
 
-Os 66 `.amxx` gerados são estruturalmente válidos e passam pelo nosso próprio disassembler,
-mas **nenhum foi carregado num servidor**, e **nenhuma saída foi comparada com o amxxpc**.
-"Melhor que o amxxpc" está apoiado em 6 bugs do compilador original encontrados e corrigidos
-(ver `docs/DIVERGENCES.md` §1) — não em medição de paridade.
+"Melhor que o amxxpc" se apoia nos 6 bugs do compilador original documentados em
+`DIVERGENCES.md` §1 — macro auto-recursiva que trava, ciclo de include que estoura a
+pilha, erros 60/61 mortos, divisão constante por zero que mata o processo, 4 regras de
+peephole com mnemônico inexistente, e um marcador de registrador morto que o upstream
+confia e nós provamos por análise de liveness.
 
-
-
+### Infraestrutura de validação
+- `scripts/difftest.mjs` — oráculo diferencial. O `amxxpc` 1.10.0 está em
+  `.../ztest/cstrike/addons/amxmodx/scripting/amxxpc.exe`.
+- `crates/zpc-asm/src/disasm.rs` — disassembly normalizado, independente de layout.
+- `crates/zpc/tests/fixtures/` — Pawn escrito à mão cobrindo as armadilhas conhecidas.
