@@ -583,6 +583,14 @@ impl Generator {
         let mut decls: Vec<Declarator> = Vec::new();
         collect_return_shape(&body.stmts, &mut decls, &mut returned);
 
+        // This is an INFERENCE pass over the whole body, run before any statement
+        // has executed, so a dimension may legitimately reference something not
+        // declared yet - a block-local `const SIZE = 63` used by a later
+        // `new buf[SIZE]`, for instance. Folding here must therefore be silent:
+        // reporting error 8 from a speculative walk produced a diagnostic for
+        // perfectly valid code, and the real `declloc()` folds the same dimension
+        // again later, at a point where the constant *is* in scope.
+        let saved = std::mem::take(&mut self.diags);
         for d in decls {
             if d.dims.is_empty() {
                 continue;
@@ -595,6 +603,8 @@ impl Generator {
                 ambiguous.push(d.name.name.clone());
             }
         }
+        // Drop whatever the speculative folds reported and restore the real list.
+        self.diags = saved;
 
         let Some(name) = returned else { return Vec::new() };
         if ambiguous.contains(&name) {
