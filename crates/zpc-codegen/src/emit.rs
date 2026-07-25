@@ -654,6 +654,15 @@ impl Generator {
                 Some((EnumStepOp::Shl, s)) => ((value as u32) << (s as u32 & 31)) as i32,
             };
         }
+
+        // "set the enum name to the 'next' value (typically the last value plus
+        // one)": `enumsym->addr = value` in decl_enum(). This is what makes the
+        // enum-as-struct idiom work - `enum PlayerData { pd_name[32], pd_score }`
+        // followed by `new data[PlayerData]`, where the enum's own name is the
+        // total size. Without it every such array size was error 8.
+        if let Some(n) = &e.name {
+            self.define_const_tagged(&n.name, next, TagId::UNTAGGED, n.span);
+        }
     }
 
     pub(crate) fn define_const(&mut self, name: &str, value: Cell, span: Span) {
