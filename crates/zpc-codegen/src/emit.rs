@@ -37,7 +37,7 @@ use zpc_ast::expr::{Expr, ExprKind, StringLit};
 use zpc_ast::{Program, Span, TagRef};
 use zpc_diag::Diagnostics;
 use zpc_sema::fold::{ArrayInfo, Cell, Const, Folder, MapEnv, TagConfig};
-use zpc_sema::symbols::{SymKind, SymbolDecl, SymbolTable};
+use zpc_sema::symbols::{SymKind, SymbolDecl, SymbolTable, Usage};
 use zpc_sema::tags::{OpKind, Overload, Overloads, TagId, Tags};
 
 use crate::layout::{Callee, Class, DataSeg, Env, FuncInfo, Param, ParamKind, VarInfo, VarKind};
@@ -657,11 +657,19 @@ impl Generator {
                 self.fold_env =
                     std::mem::take(&mut self.fold_env).with_array(&d.name.name, dims.as_slice());
             }
-            self.table.declare(SymbolDecl::new(
-                &d.name.name,
-                if kind.is_array() { SymKind::Array } else { SymKind::Variable },
-                d.name.span,
-            ));
+            // A variable declaration IS its definition - it has storage. Without
+            // Usage::DEFINED the folder's `sizeof` treats the symbol as merely
+            // announced and reports error 17, so `sizeof(g)` - and therefore every
+            // `charsmax(g)`, which expands to `sizeof(g)-1` - failed on a variable
+            // that was declared perfectly well.
+            self.table.declare(
+                SymbolDecl::new(
+                    &d.name.name,
+                    if kind.is_array() { SymKind::Array } else { SymKind::Variable },
+                    d.name.span,
+                )
+                .with_usage(Usage::DEFINED),
+            );
             let mut info = VarInfo::global(addr, kind);
             info.is_const = v.modifiers.is_const;
             info.tag = self.tag_of(d.tag.as_ref());
@@ -928,11 +936,19 @@ impl Generator {
                 self.fold_env = std::mem::take(&mut self.fold_env)
                     .with_array(&d.name.name, &ArrayInfo { dims: kind.dims().to_vec() }.dims);
             }
-            self.table.declare(SymbolDecl::new(
-                &d.name.name,
-                if kind.is_array() { SymKind::Array } else { SymKind::Variable },
-                d.name.span,
-            ));
+            // A variable declaration IS its definition - it has storage. Without
+            // Usage::DEFINED the folder's `sizeof` treats the symbol as merely
+            // announced and reports error 17, so `sizeof(g)` - and therefore every
+            // `charsmax(g)`, which expands to `sizeof(g)-1` - failed on a variable
+            // that was declared perfectly well.
+            self.table.declare(
+                SymbolDecl::new(
+                    &d.name.name,
+                    if kind.is_array() { SymKind::Array } else { SymKind::Variable },
+                    d.name.span,
+                )
+                .with_usage(Usage::DEFINED),
+            );
             // A multi-tag parameter (`{Float,_}:x`) has no single tag to
             // dispatch on; `check_userop()` would use `tags[0]`, and so do we.
             let tag = match d.tags.as_ref().and_then(|t| t.tags.first()) {
@@ -1018,3 +1034,4 @@ mod tests {
         assert_eq!(g.string_cells(&s), vec![0x6162_6364u32 as i32, 0]);
     }
 }
+
