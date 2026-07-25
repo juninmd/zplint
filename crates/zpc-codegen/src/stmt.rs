@@ -134,6 +134,25 @@ impl Generator {
                 std::mem::take(&mut self.fold_env).with_symbol_tag(&d.name.name, tag.raw() as i32);
             let mut info = VarInfo { addr, class: Class::Local, kind, is_const: false, tag };
             info.is_const = decl.modifiers.is_const;
+
+            // Locals must reach the symbol table too, not just `env`: the folder
+            // resolves `sizeof`/`charsmax` through the table, so a local array was
+            // reported as an undefined symbol (17) by `sizeof(buf)` even though
+            // reading `buf` worked. `charsmax()` expands to `sizeof(x)-1`, so this
+            // hit essentially every local string buffer.
+            self.table.declare(
+                zpc_sema::symbols::SymbolDecl::new(
+                    &d.name.name,
+                    if info.kind.is_array() {
+                        zpc_sema::symbols::SymKind::Array
+                    } else {
+                        zpc_sema::symbols::SymKind::Variable
+                    },
+                    d.name.span,
+                )
+                .with_usage(zpc_sema::symbols::Usage::DEFINED),
+            );
+
             self.env.declare_local(d.name.name.clone(), info.clone());
 
             if info.kind.is_array() {
