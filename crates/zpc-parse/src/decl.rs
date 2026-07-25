@@ -523,12 +523,15 @@ impl Parser<'_> {
             self.error(82, s.span, &[]); // operators may not have states
         }
 
-        // `newfunc()` treats a `;` here as an old-style prototype. With optional
-        // semicolons a line break does the same, but a `{` opening the body on the
-        // *next* line is still a body, so it is tested first.
+        // `newfunc()` treats an EXPLICIT `;` here as an old-style prototype:
+        // `if (matchtoken(';'))`. A line break does NOT - it warns 218 ("old style
+        // prototypes used with optional semicolumns") only when the semicolon is
+        // really there. Treating a newline as a prototype terminator broke every
+        // braceless function body, which is how `float.inc` and everything that
+        // includes it failed with error 010.
         let body = if self.at(&TokenKind::LBrace) {
             Some(self.parse_block())
-        } else if self.eat(&TokenKind::Semi) || self.at_terminator() {
+        } else if self.eat(&TokenKind::Semi) {
             None
         } else {
             // Pawn permits a single statement as a whole function body.
