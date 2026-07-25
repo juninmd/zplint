@@ -363,6 +363,12 @@ impl Parser<'_> {
                 break;
             }
         }
+        // `case 1 .. sizeof g:` - the scanner glued `g:` into one Label token, so
+        // the colon is already consumed and demanding another would report a
+        // spurious error 1.
+        if std::mem::take(&mut self.pending_label_colon) {
+            return labels;
+        }
         self.expect(&TokenKind::Colon);
         labels
     }

@@ -76,6 +76,12 @@ pub struct Parser<'a> {
     pos: usize,
     file: PathBuf,
     pub(crate) diags: Diagnostics,
+    /// Set when a construct consumed a `Label` token whose `:` really belonged to
+    /// the surrounding syntax - `case 1 .. sizeof g:` lexes `g:` as one token, so
+    /// the case's terminating colon is already gone by the time the label list
+    /// looks for it. The compiler sidesteps this by clearing `sc_allowtags` in
+    /// `doswitch()`; our scanner has no such state, so the parser compensates.
+    pub(crate) pending_label_colon: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -84,7 +90,14 @@ impl<'a> Parser<'a> {
             tokens.last().is_some_and(|t| t.kind == TokenKind::Eof),
             "the token stream must be terminated by Eof"
         );
-        Self { src, tokens, pos: 0, file: file.into(), diags: Diagnostics::new() }
+        Self {
+            src,
+            tokens,
+            pos: 0,
+            file: file.into(),
+            diags: Diagnostics::new(),
+            pending_label_colon: false,
+        }
     }
 
     /// The whole translation unit. Mirrors `parse()`: only declarations are legal
@@ -402,3 +415,4 @@ mod tests {
         assert_eq!(p.eat_ident().unwrap().name, "x");
     }
 }
+

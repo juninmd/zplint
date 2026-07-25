@@ -417,7 +417,19 @@ impl<'a> Parser<'a> {
         let start = self.cur_span();
         self.bump(); // `sizeof`
         let parens = self.eat_repeated_lparens();
-        let symbol = self.expect_ident().unwrap_or_else(|| Ident::new(String::new(), start));
+        // The scanner glues `name` + an adjacent `:` into one Label token, so in
+        // `case 1 .. sizeof g:` the operand arrives as Label("g") with the case's
+        // terminating colon already swallowed. Unpack it back into the identifier
+        // and let the caller know the colon is gone - the compiler avoids this by
+        // clearing `sc_allowtags` inside `doswitch()`, which our scanner cannot do.
+        let symbol = if let TokenKind::Label(name) = self.peek().clone() {
+            let span = self.cur_span();
+            self.bump();
+            self.pending_label_colon = true;
+            Ident::new(name, span)
+        } else {
+            self.expect_ident().unwrap_or_else(|| Ident::new(String::new(), start))
+        };
         let levels = self.parse_sizeof_levels();
         self.close_repeated_parens(parens);
         let span = start.to(self.prev_span());
