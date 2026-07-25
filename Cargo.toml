@@ -3,7 +3,7 @@ members = ["crates/*"]
 
 [package]
 name = "zplint"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Lightning-fast linter for Pawn/AMXX (CS 1.6) plugins with Zombie Plague 5.0 support"
 authors = ["zplague-addons"]
