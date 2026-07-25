@@ -1024,3 +1024,176 @@ fn every_emitted_instruction_has_its_declared_operand_count() {
         "an instruction was built with the wrong arity"
     );
 }
+
+// ------------------------------------------------- user-defined operators
+
+/// The four `native` overloads `float.inc` declares, in the same order, so that
+/// the native indices in the assertions below are stable.
+const FLOAT_OPS: &str = r#"
+    native Float:operator*(Float:a, Float:b) = floatmul;
+    native Float:operator/(Float:a, Float:b) = floatdiv;
+    native Float:operator+(Float:a, Float:b) = floatadd;
+    native Float:operator-(Float:a, Float:b) = floatsub;
+"#;
+
+#[test]
+fn an_operator_overload_is_registered_under_its_mangled_name() {
+    // `native Float:operator*(...) = floatmul;` has no legal exported name of
+    // its own, so the *alias* is what reaches the native table.
+    let unit = compile(FLOAT_OPS);
+    assert_eq!(unit.natives, ["floatmul", "floatdiv", "floatadd", "floatsub"]);
+    assert!(
+        !unit.diags.items().iter().any(|d| d.is_error()),
+        "declaring an operator must no longer be error 7: {:?}",
+        unit.diags.items()
+    );
+}
+
+#[test]
+fn multiplying_two_floats_calls_the_overload_instead_of_smul() {
+    let src = format!("{FLOAT_OPS} foo(Float:a, Float:b) {{ return _:(a * b); }}");
+    let ops = body_ops(&src);
+    assert!(ops.contains(&Opcode::SysreqC), "no call was emitted:\n{ops:?}");
+    assert!(!ops.contains(&Opcode::Smul), "the integer opcode was emitted anyway:\n{ops:?}");
+
+    // check_userop(): "the left operand is in the secondary register and the
+    // right operand is in the primary register", pushed in reversed order.
+    let items = body(&src);
+    assert_eq!(
+        opcodes(&items),
+        [
+            Opcode::LoadSPri, // a  -> PRI
+            Opcode::PushPri,
+            Opcode::LoadSPri, // b  -> PRI
+            Opcode::PopAlt,   // a  -> ALT
+            Opcode::PushPri,  // right operand first
+            Opcode::PushAlt,  // then the left one
+            Opcode::PushC,    // 2*cell
+            Opcode::SysreqC,
+            Opcode::Stack, // the caller drops the arguments plus the count cell
+            Opcode::Retn,
+            Opcode::ZeroPri, // the unconditional tail, removed by the peephole
+            Opcode::Retn,
+        ]
+    );
+    // `operator*` is native 0, and the argument-count cell says two arguments.
+    assert_eq!(first_imm(&items, Opcode::SysreqC), 0);
+    assert_eq!(first_imm(&items, Opcode::PushC), 2 * 4);
+}
+
+#[test]
+fn untagged_multiplication_still_uses_the_integer_opcode() {
+    // check_userop()'s quick exit: "user-defined operators on untagged operands
+    // are forbidden".
+    let src = format!("{FLOAT_OPS} foo(a, b) {{ return a * b; }}");
+    let ops = body_ops(&src);
+    assert!(ops.contains(&Opcode::Smul), "{ops:?}");
+    assert!(!ops.contains(&Opcode::SysreqC), "{ops:?}");
+}
+
+#[test]
+fn a_tag_cast_changes_which_operator_is_dispatched() {
+    let src = format!("{FLOAT_OPS} foo(a, b) {{ return _:(Float:a * Float:b); }}");
+    let ops = body_ops(&src);
+    assert!(ops.contains(&Opcode::SysreqC), "the cast must select the overload:\n{ops:?}");
+    assert!(!ops.contains(&Opcode::Smul), "{ops:?}");
+
+    // ... and `_:` strips it again.
+    let src = format!("{FLOAT_OPS} foo(Float:a, Float:b) {{ return _:a * _:b; }}");
+    let ops = body_ops(&src);
+    assert!(ops.contains(&Opcode::Smul), "{ops:?}");
+    assert!(!ops.contains(&Opcode::SysreqC), "{ops:?}");
+}
+
+#[test]
+fn a_commutative_operator_dispatches_with_the_operands_swapped() {
+    // Only `operator+(Float:, _:)` exists, so `1 + f` must find it by swapping.
+    let src = "
+        native Float:operator+(Float:a, b) = floatadd;
+        foo(Float:f, n) { return _:(n + f); }
+    ";
+    let items = body(src);
+    let ops = opcodes(&items);
+    assert!(ops.contains(&Opcode::SysreqC), "{ops:?}");
+    assert!(!ops.contains(&Opcode::Add), "{ops:?}");
+    // swapparams: `pushreg(sALT); pushreg(sPRI)` - the Float: operand goes first.
+    let pushes: Vec<Opcode> =
+        ops.iter().copied().filter(|o| matches!(o, Opcode::PushPri | Opcode::PushAlt)).collect();
+    assert_eq!(pushes.last().copied(), Some(Opcode::PushPri));
+}
+
+#[test]
+fn a_float_comparison_saves_pri_across_the_call() {
+    // binoper_savepri is TRUE for the relational operators: the chained form
+    // needs ALT untouched, so PRI is pushed before the operands and popped into
+    // ALT afterwards.
+    let src = "
+        native bool:operator<(Float:a, Float:b) = floatcmp;
+        foo(Float:a, Float:b) { return _:(a < b); }
+    ";
+    let ops = body_ops(src);
+    assert!(ops.contains(&Opcode::SysreqC), "{ops:?}");
+    assert!(!ops.contains(&Opcode::Sless), "{ops:?}");
+    assert_eq!(ops.iter().filter(|o| **o == Opcode::PopAlt).count(), 2, "{ops:?}");
+}
+
+#[test]
+fn incrementing_a_float_calls_the_stock_and_stores_the_result_back() {
+    let src = "
+        native Float:operator+(Float:a, Float:b) = floatadd;
+        stock Float:operator++(Float:oper) return oper + 1.0;
+        foo() { new Float:f; f++; }
+    ";
+    let items = body(src);
+    let ops = opcodes(&items);
+    // `operator++` is an ordinary stock, so it is reached with `call`.
+    assert!(ops.contains(&Opcode::Call), "no call to the stock:\n{ops:?}");
+    assert!(!ops.contains(&Opcode::IncS), "the integer increment was emitted:\n{ops:?}");
+    // check_userop(): rvalue, push, call, store back, moveto1.
+    assert!(ops.contains(&Opcode::StorSPri), "the result is not stored back:\n{ops:?}");
+    assert!(ops.contains(&Opcode::MovePri), "moveto1() is missing:\n{ops:?}");
+    assert_eq!(first_imm(&items, Opcode::PushC), 4, "one argument");
+}
+
+#[test]
+fn an_operator_body_does_not_recurse_into_itself() {
+    // "we don't want to use the redefined operator in the function that
+    // redefines the operator itself" (sc3.c:202-209).
+    let src = "stock Float:operator+(Float:a, Float:b) return _:(a + b);";
+    let unit = compile(src);
+    let ops = crate::stream::opcodes(&unit.code);
+    assert!(ops.contains(&Opcode::Add), "the built-in opcode must stand:\n{ops:?}");
+    assert!(!ops.contains(&Opcode::Call), "{ops:?}");
+}
+
+#[test]
+fn a_forward_only_operator_is_rejected_rather_than_compiled() {
+    // float.inc declares `forward operator%(Float:, Float:)` precisely so that
+    // the modulus of two floats does not silently become an integer sdiv.
+    let src = "
+        forward operator%(Float:a, Float:b);
+        foo(Float:a, Float:b) { return _:(a % b); }
+    ";
+    let unit = compile(src);
+    let codes: Vec<u16> = unit.diags.items().iter().filter(|d| d.is_error()).map(|d| d.code).collect();
+    assert!(codes.contains(&4), "expected error 4, got {codes:?}");
+    let ops = crate::stream::opcodes(&unit.code);
+    assert!(!ops.contains(&Opcode::SdivAlt), "the integer opcode must not stand in:\n{ops:?}");
+}
+
+#[test]
+fn an_operator_on_untagged_operands_is_error_64() {
+    let unit = compile("stock operator+(a, b) return a + b;");
+    let codes: Vec<u16> = unit.diags.items().iter().filter(|d| d.is_error()).map(|d| d.code).collect();
+    assert!(codes.contains(&64), "expected error 64, got {codes:?}");
+}
+
+#[test]
+fn the_assignment_and_destructor_operators_are_still_error_7() {
+    for src in ["stock Float:operator=(oper) return Float:oper;", "stock operator~(Float:a[]) {}"] {
+        let unit = compile(src);
+        let codes: Vec<u16> =
+            unit.diags.items().iter().filter(|d| d.is_error()).map(|d| d.code).collect();
+        assert!(codes.contains(&7), "expected error 7 for `{src}`, got {codes:?}");
+    }
+}

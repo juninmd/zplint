@@ -26,14 +26,13 @@
 //! * **Automata and states** (`state x;`, `func() <idle>`): `writeleader()` in
 //!   `sc4.c` builds a state-selector table and per-function dispatch stubs. Not
 //!   emitted; `Stmt::State` raises error 86.
-//! * **User-defined operators** (`operator+(Float:,Float:)`): `check_userop()` in
-//!   `sc3.c` rewrites almost every operator emission into a function call.
-//!   `FuncName::Operator` raises error 7. [`zpc_sema::tags::Overloads`] already
-//!   implements the resolution, but it is keyed entirely on the *tags* of the
-//!   operands (`operator_symname()` builds the symbol name out of them), and no
-//!   tag ids reach codegen at all - see the `Tags` entry below. Dispatching
-//!   without them would have to guess which overload applies, and a wrong guess
-//!   silently calls the wrong function, so the error stands.
+//! * **`operator=` and `operator~`**: the coercion hook and the array
+//!   destructor. `operator=` is consulted at assignment, initialisation and
+//!   by-value argument passing, none of which [`userop`] dispatches, and
+//!   `operator~` has no call site at all. Registering either without dispatch
+//!   would silently do nothing, so `FuncName::Operator` still raises error 7 for
+//!   exactly those two forms. Neither appears in the AMX Mod X headers. Every
+//!   other operator overload is registered and dispatched - see [`userop`].
 //! * **Some `sc7.c` peephole sequences.** [`peephole::optimise`] ports most of
 //!   `sequences[]`; the rows it deliberately leaves out (the chained-relational
 //!   `xchg` family, the `;$lcl` declaration rows and the user-defined-operator
@@ -51,8 +50,11 @@
 //!   infers it in the pre-pass from a `return` naming an unambiguously declared
 //!   array; when it cannot, `return` of an array raises error 46 rather than
 //!   compiling a `load.i` of the base address.
-//! * **Tags**: no tag ids are propagated, so `exit`/`sleep` always pass tag 0 and
-//!   no warning 213 is raised here. Tag checking is [`zpc_sema::tags`]' job.
+//! * **Tag *checking***: [`Generator::expr_tag`] propagates tag ids far enough to
+//!   dispatch user-defined operators (literals, variables, parameters, constants
+//!   and enum members, casts, call results, subscripts and the operators
+//!   themselves), but codegen still raises no warning 213 and `exit`/`sleep`
+//!   still pass tag 0 in ALT. Tag *checking* remains [`zpc_sema::tags`]' job.
 //!
 //! # Uncertainties
 //!
@@ -76,6 +78,7 @@ pub mod layout;
 pub mod peephole;
 pub mod stmt;
 pub mod stream;
+pub mod userop;
 
 pub use emit::{Generator, Unit};
 pub use peephole::optimise;

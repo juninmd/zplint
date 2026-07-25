@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use zpc_sema::tags::TagId;
+
 use crate::stream::{CELL, LabelId};
 
 /// How a variable is reached. Mirrors the `ident` field of `value` in `sc.h`, which
@@ -120,15 +122,18 @@ pub struct VarInfo {
     pub kind: VarKind,
     /// `uCONST` - assignment to it is error 22.
     pub is_const: bool,
+    /// `sym->tag`: the declared tag, which is what `check_userop()` dispatches
+    /// on. An array's tag is the tag of its *elements*.
+    pub tag: TagId,
 }
 
 impl VarInfo {
     pub fn global(addr: i32, kind: VarKind) -> Self {
-        Self { addr, class: Class::Global, kind, is_const: false }
+        Self { addr, class: Class::Global, kind, is_const: false, tag: TagId::UNTAGGED }
     }
 
     pub fn local(addr: i32, kind: VarKind) -> Self {
-        Self { addr, class: Class::Local, kind, is_const: false }
+        Self { addr, class: Class::Local, kind, is_const: false, tag: TagId::UNTAGGED }
     }
 }
 
@@ -178,6 +183,12 @@ pub struct FuncInfo {
     /// `iREFARRAY` symbol *beneath* the function symbol; `callfunction()` finds it
     /// with `finddepend(sym)` and switches to the hidden-parameter convention.
     pub ret_dims: Vec<i32>,
+    /// `sym->tag`: the return tag, which becomes the tag of a call expression
+    /// and, for an operator overload, the tag `check_userop()` reports back.
+    pub ret_tag: TagId,
+    /// Whether a *definition* (a body) was seen. `check_userop()` raises error 4
+    /// when the operator it selected exists only as a `forward`.
+    pub defined: bool,
 }
 
 impl FuncInfo {
@@ -399,6 +410,8 @@ mod tests {
             ],
             variadic: true,
             ret_dims: Vec::new(),
+            ret_tag: TagId::UNTAGGED,
+            defined: true,
         };
         assert_eq!(info.param_at(0).unwrap().kind, ParamKind::Array);
         assert_eq!(info.param_at(9).unwrap().kind, ParamKind::VarArgs);

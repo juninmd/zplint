@@ -31,13 +31,14 @@ use std::path::PathBuf;
 use zpc_asm::Opcode;
 use zpc_ast::decl::{
     ConstDecl, Declarator, EnumDecl, EnumStepOp, FuncDecl, FuncKind, FuncName, Init, InitList, Item,
-    Param as AstParam, ParamDefault, VarDecl,
+    NativeAlias, OverloadableOp, Param as AstParam, ParamDefault, VarDecl,
 };
 use zpc_ast::expr::{Expr, ExprKind, StringLit};
-use zpc_ast::{Program, Span};
+use zpc_ast::{Program, Span, TagRef};
 use zpc_diag::Diagnostics;
 use zpc_sema::fold::{ArrayInfo, Cell, Const, Folder, MapEnv, TagConfig};
 use zpc_sema::symbols::{SymKind, SymbolDecl, SymbolTable};
+use zpc_sema::tags::{OpKind, Overload, Overloads, TagId, Tags};
 
 use crate::layout::{Callee, Class, DataSeg, Env, FuncInfo, Param, ParamKind, VarInfo, VarKind};
 use crate::stream::{AsmStream, CELL, Item as AsmItem, LabelId, Reg};
@@ -88,6 +89,21 @@ pub struct Generator {
     pub(crate) table: SymbolTable,
     pub(crate) fold_env: MapEnv,
     pub(crate) tags: TagConfig,
+    /// `tagname_tab`: every tag mentioned in this unit, interned.
+    pub(crate) tag_tab: Tags,
+    /// The reverse of [`Generator::tag_tab`]'s interning, so that a raw tag id
+    /// coming back out of the folder can be turned into a [`TagId`] again.
+    pub(crate) tag_by_raw: HashMap<i32, TagId>,
+    /// The declared `operator` overloads, keyed exactly as `findglb()` keys them.
+    /// The callable side of each one lives in `env` under the same mangled name.
+    pub(crate) ops: Overloads,
+    /// The mangled name `collect_func()` gave each `operator` declaration, keyed
+    /// by the declaration's span so that the emit pass can find it again.
+    pub(crate) op_names: HashMap<(u32, u32), String>,
+    /// The mangled name of the operator whose body is being emitted, if any.
+    /// `check_userop()` refuses to dispatch to `sym == curfunc`, which is what
+    /// stops `Float:operator+(Float:a, Float:b) return a + b` recursing.
+    pub(crate) cur_op: Option<String>,
 
     /// Cells of locals allocated in the current function, `declared` in `sc1.c`.
     pub(crate) declared: i32,
@@ -110,7 +126,7 @@ pub struct Generator {
 impl Generator {
     pub fn new(file: impl Into<PathBuf>) -> Self {
         let file = file.into();
-        Self {
+        let mut g = Self {
             asm: AsmStream::new(),
             data: DataSeg::new(),
             env: Env::new(),
@@ -119,6 +135,11 @@ impl Generator {
             file,
             fold_env: MapEnv::new(),
             tags: TagConfig::default(),
+            tag_tab: Tags::new(),
+            tag_by_raw: HashMap::new(),
+            ops: Overloads::new(),
+            op_names: HashMap::new(),
+            cur_op: None,
             declared: 0,
             decl_heap: 0,
             cur_nargs: 0,
@@ -127,7 +148,44 @@ impl Generator {
             goto_labels: HashMap::new(),
             natives: Vec::new(),
             publics: Vec::new(),
+        };
+        // `#pragma rational Float` in float.inc. Registering it up front is what
+        // stops the folder from constant-folding `1.0 + 2.0` into an *integer*
+        // add of two bit patterns: `fold_binary()` bails out on the rational tag
+        // precisely because `check_userop()` would claim the expression.
+        for name in ["bool", "Float", "String", "any"] {
+            g.intern_tag(name);
         }
+        g.tags = TagConfig {
+            bool_tag: g.tag_tab.bool_tag().raw() as i32,
+            rational_tag: g.tag_tab.rational_tag().raw() as i32,
+            rational_digits: 0,
+        };
+        g
+    }
+
+    // ------------------------------------------------------------------ tags
+
+    /// `pc_addtag()`, plus the two side tables codegen needs: the raw-id reverse
+    /// map and the folder's tag environment (which resolves `Float:x` casts).
+    pub(crate) fn intern_tag(&mut self, name: &str) -> TagId {
+        let id = self.tag_tab.add(name);
+        self.tag_by_raw.insert(id.raw() as i32, id);
+        self.fold_env = std::mem::take(&mut self.fold_env).with_tag(name, id.raw() as i32);
+        id
+    }
+
+    /// The tag a declaration ascribes: `None` and `_:` are both untagged.
+    pub(crate) fn tag_of(&mut self, tag: Option<&TagRef>) -> TagId {
+        match tag {
+            None => TagId::UNTAGGED,
+            Some(t) => self.intern_tag(&t.name.name),
+        }
+    }
+
+    /// Turn a raw tag id (as the folder reports it) back into a [`TagId`].
+    pub(crate) fn tag_from_raw(&self, raw: i32) -> TagId {
+        self.tag_by_raw.get(&raw).copied().unwrap_or(TagId::UNTAGGED)
     }
 
     // ------------------------------------------------------------ diagnostics
@@ -219,12 +277,16 @@ impl Generator {
     }
 
     fn collect_func(&mut self, f: &FuncDecl) {
-        let FuncName::Ident(name) = &f.name else {
-            // Operator overloads (`operator+(...)`) are mangled into ordinary
-            // symbols by `operator_symname()` in sc3.c and then dispatched by
-            // `check_userop()`. Neither is implemented; see the crate docs.
-            self.error(7, f.span, &[]);
-            return;
+        // `operatoradjust()` (sc1.c:3024) renames an operator overload to the
+        // mangled name `operator_symname()` builds out of its argument tags;
+        // from here on it is an ordinary global function that only
+        // `check_userop()` ever names.
+        let (name, span, is_op) = match &f.name {
+            FuncName::Ident(id) => (id.name.clone(), id.span, false),
+            FuncName::Operator { op, span } => match self.declare_operator(f, *op, *span) {
+                Some(mangled) => (mangled, *span, true),
+                None => return,
+            },
         };
 
         let params: Vec<Param> = f
@@ -261,11 +323,18 @@ impl Generator {
                 // declaration order here, which is deterministic and matches
                 // amxxpc for the common case of one native table per file.
                 let idx = self.natives.len() as i32;
-                self.natives.push(name.name.clone());
+                // A native operator has no legal exported name of its own, so
+                // `native Float:operator*(...) = floatmul;` must register
+                // `floatmul` in the native table (`funcstub()`, sc1.c).
+                let exported = match (is_op, &f.alias) {
+                    (true, Some(NativeAlias::Symbol(a))) => a.name.clone(),
+                    _ => name.clone(),
+                };
+                self.natives.push(exported);
                 Callee::Native(idx)
             }
             _ => {
-                if let Some(existing) = self.env.func(&name.name) {
+                if let Some(existing) = self.env.func(&name) {
                     existing.callee.clone()
                 } else {
                     Callee::Func(self.asm.label())
@@ -273,11 +342,15 @@ impl Generator {
             }
         };
 
+        let implicitly_public = match &f.name {
+            FuncName::Ident(id) => id.is_implicitly_public(),
+            FuncName::Operator { .. } => false,
+        };
         if f.body.is_some()
-            && (f.modifiers.public || name.is_implicitly_public())
+            && (f.modifiers.public || implicitly_public)
             && let Callee::Func(l) = callee
         {
-            self.publics.push((name.name.clone(), l));
+            self.publics.push((name.clone(), l));
         }
 
         // `funcstub()` (sc1.c:3242-3258) reads the `[n]` list that sits between the
@@ -307,7 +380,7 @@ impl Generator {
         // shape, so that `doreturn()` can compare the returned array against it
         // and raise error 47 on a mismatch (sc1.c:5450-5472).
         if ret_dims.is_empty()
-            && let Some(existing) = self.env.func(&name.name)
+            && let Some(existing) = self.env.func(&name)
         {
             ret_dims = existing.ret_dims.clone();
         }
@@ -315,8 +388,113 @@ impl Generator {
             ret_dims = self.infer_return_dims(f);
         }
 
-        self.table.declare(SymbolDecl::new(&name.name, SymKind::Function, name.span));
-        self.env.declare_func(name.name.clone(), FuncInfo { callee, params, variadic, ret_dims });
+        let ret_tag = self.tag_of(f.return_tag.as_ref());
+        // A `forward` followed by a definition must end up defined; a definition
+        // followed by a prototype must stay defined.
+        let defined = f.body.is_some()
+            || f.kind == FuncKind::Native
+            || self.env.func(&name).is_some_and(|e| e.defined);
+
+        self.table.declare(SymbolDecl::new(&name, SymKind::Function, span));
+        self.env.declare_func(
+            name,
+            FuncInfo { callee, params, variadic, ret_dims, ret_tag, defined },
+        );
+    }
+
+    /// `operatoradjust()` (`sc1.c:3024`): validate the shape of an `operator`
+    /// declaration, record the overload, and return the mangled symbol name the
+    /// function is stored under.
+    ///
+    /// `None` means the form is rejected; the diagnostic has been raised.
+    fn declare_operator(
+        &mut self,
+        f: &FuncDecl,
+        op: OverloadableOp,
+        span: Span,
+    ) -> Option<String> {
+        // `operator=` is a coercion hook consulted on every assignment,
+        // initialisation and by-value argument pass, and `operator~` is the
+        // array destructor. Neither is dispatched by this port, so registering
+        // them would be worse than refusing them: error 7 stands for those two
+        // forms only. Nothing in the AMX Mod X headers declares either.
+        if matches!(op, OverloadableOp::Assign | OverloadableOp::BitNot) {
+            self.error(7, span, &[]);
+            return None;
+        }
+
+        // "count arguments and save (first two) tags"
+        let mut tags = [TagId::UNTAGGED; 2];
+        let mut count = 0usize;
+        for p in &f.params {
+            let AstParam::Fixed(d) = p else {
+                // `...` cannot appear on an operator; `arg->ident != iVARIABLE`.
+                self.error(66, span, &[]);
+                return None;
+            };
+            if count < 2 {
+                match d.tags.as_ref().map(|t| t.tags.as_slice()) {
+                    Some([one]) => tags[count] = self.intern_tag(&one.name.name),
+                    Some([]) | None => {}
+                    // "function argument may only have a single tag"
+                    Some(_) => self.error(65, d.span, &[&(count + 1).to_string()]),
+                }
+            }
+            if d.by_ref || !d.dims.is_empty() {
+                self.error(66, d.span, &[&d.name.name]);
+                return None;
+            }
+            if d.default.is_some() {
+                self.error(59, d.span, &[&d.name.name]);
+            }
+            count += 1;
+        }
+
+        let kind = match (op, count) {
+            (OverloadableOp::Add, 2) => OpKind::Add,
+            (OverloadableOp::Sub, 2) => OpKind::Sub,
+            (OverloadableOp::Sub, 1) => OpKind::Neg,
+            (OverloadableOp::Mul, 2) => OpKind::Mul,
+            (OverloadableOp::Div, 2) => OpKind::Div,
+            (OverloadableOp::Mod, 2) => OpKind::Mod,
+            (OverloadableOp::Gt, 2) => OpKind::Gt,
+            (OverloadableOp::Lt, 2) => OpKind::Lt,
+            (OverloadableOp::Ge, 2) => OpKind::Ge,
+            (OverloadableOp::Le, 2) => OpKind::Le,
+            (OverloadableOp::Eq, 2) => OpKind::Eq,
+            (OverloadableOp::Ne, 2) => OpKind::Ne,
+            (OverloadableOp::Not, 1) => OpKind::LogNot,
+            (OverloadableOp::Inc, 1) => OpKind::Inc,
+            (OverloadableOp::Dec, 1) => OpKind::Dec,
+            // `=` and `~` were rejected above; anything else reaching here has
+            // the wrong number of operands.
+            // "number or placement of the operands does not fit the operator"
+            _ => {
+                self.error(62, span, &[]);
+                return None;
+            }
+        };
+
+        let rhs = (count == 2).then_some(tags[1]);
+        // "cannot change predefined operators": an overload on untagged
+        // operands could never be selected anyway (`check_userop()`'s quick
+        // exit), so it would silently do nothing.
+        if tags[0].is_untagged() && rhs.is_none_or(TagId::is_untagged) {
+            self.error(64, span, &[]);
+            return None;
+        }
+
+        let result = self.tag_of(f.return_tag.as_ref());
+        self.ops.declare(Overload { kind, lhs: tags[0], rhs, result });
+        let mangled = Overloads::mangle(kind, tags[0], rhs, tags[0]);
+        self.op_names.insert((f.span.start, f.span.end), mangled.clone());
+        Some(mangled)
+    }
+
+    /// The mangled name [`Generator::declare_operator`] recorded for this
+    /// declaration.
+    fn operator_name(&self, f: &FuncDecl) -> Option<String> {
+        self.op_names.get(&(f.span.start, f.span.end)).cloned()
     }
 
     /// The shape `doreturn()` would clone beneath the function symbol: the
@@ -369,7 +547,8 @@ impl Generator {
 
     fn collect_const(&mut self, c: &ConstDecl) {
         let value = self.const_expr(&c.value);
-        self.define_const(&c.name.name, value, c.name.span);
+        let tag = self.tag_of(c.tag.as_ref());
+        self.define_const_tagged(&c.name.name, value, tag, c.name.span);
     }
 
     fn collect_enum(&mut self, e: &EnumDecl) {
@@ -378,12 +557,23 @@ impl Generator {
         // advances by its size.
         let mut next: Cell = 0;
         let step = e.step.as_ref().map(|s| (s.op, self.const_expr(&s.value)));
+        // `enum Colour {..}` tags every member with `Colour:`; an explicit
+        // `enum Tag: {..}` overrides that and `enum _: {..}` clears it.
+        let enum_tag = match (&e.tag, &e.name) {
+            (Some(t), _) => self.tag_of(Some(t)),
+            (None, Some(n)) => self.intern_tag(&n.name),
+            (None, None) => TagId::UNTAGGED,
+        };
         for m in &e.members {
             let value = match &m.value {
                 Some(v) => self.const_expr(v),
                 None => next,
             };
-            self.define_const(&m.name.name, value, m.name.span);
+            let tag = match &m.tag {
+                Some(t) => self.tag_of(Some(t)),
+                None => enum_tag,
+            };
+            self.define_const_tagged(&m.name.name, value, tag, m.name.span);
             let size = match &m.size {
                 Some(s) => self.const_expr(s),
                 None => 1,
@@ -400,8 +590,19 @@ impl Generator {
     }
 
     pub(crate) fn define_const(&mut self, name: &str, value: Cell, span: Span) {
+        self.define_const_tagged(name, value, TagId::UNTAGGED, span);
+    }
+
+    pub(crate) fn define_const_tagged(
+        &mut self,
+        name: &str,
+        value: Cell,
+        tag: TagId,
+        span: Span,
+    ) {
         self.table.declare(SymbolDecl::new(name, SymKind::Constant, span));
-        self.fold_env = std::mem::take(&mut self.fold_env).with_const(name, value, 0);
+        self.fold_env =
+            std::mem::take(&mut self.fold_env).with_const(name, value, tag.raw() as i32);
         self.env.declare_const(name, value);
     }
 
@@ -426,6 +627,9 @@ impl Generator {
             ));
             let mut info = VarInfo::global(addr, kind);
             info.is_const = v.modifiers.is_const;
+            info.tag = self.tag_of(d.tag.as_ref());
+            self.fold_env = std::mem::take(&mut self.fold_env)
+                .with_symbol_tag(&d.name.name, info.tag.raw() as i32);
             self.env.declare_global(d.name.name.clone(), info);
 
             // Global initialisers are written straight into the data segment;
@@ -622,12 +826,21 @@ impl Generator {
     /// `return`.
     fn function(&mut self, f: &FuncDecl) {
         let Some(body) = &f.body else { return };
-        let FuncName::Ident(name) = &f.name else { return };
+        let name = match &f.name {
+            FuncName::Ident(id) => id.name.clone(),
+            // `collect_func()` stored the overload under its mangled name; if it
+            // rejected the declaration there is nothing to emit.
+            FuncName::Operator { .. } => match self.operator_name(f) {
+                Some(n) => n,
+                None => return,
+            },
+        };
         let Some(info @ FuncInfo { callee: Callee::Func(label), .. }) =
-            self.env.func(&name.name).cloned()
+            self.env.func(&name).cloned()
         else {
             return;
         };
+        self.cur_op = matches!(f.name, FuncName::Operator { .. }).then(|| name.clone());
 
         self.asm.place(label);
         self.asm.emit0(Opcode::Proc); // startfunc(): "creates stack frame"
@@ -654,6 +867,7 @@ impl Generator {
         // `lastst` tracking would.
         self.asm.ldconst(0, Reg::Pri);
         self.asm.ffret();
+        self.cur_op = None;
     }
 
     /// `define_args()`: argument `i` lives at `(i+3)*cell` from FRM.
@@ -682,8 +896,16 @@ impl Generator {
                 if kind.is_array() { SymKind::Array } else { SymKind::Variable },
                 d.name.span,
             ));
-            let mut info = VarInfo { addr, class: Class::Local, kind, is_const: d.is_const };
-            info.is_const = d.is_const;
+            // A multi-tag parameter (`{Float,_}:x`) has no single tag to
+            // dispatch on; `check_userop()` would use `tags[0]`, and so do we.
+            let tag = match d.tags.as_ref().and_then(|t| t.tags.first()) {
+                Some(t) => self.intern_tag(&t.name.name),
+                None => TagId::UNTAGGED,
+            };
+            self.fold_env =
+                std::mem::take(&mut self.fold_env).with_symbol_tag(&d.name.name, tag.raw() as i32);
+            let info =
+                VarInfo { addr, class: Class::Local, kind, is_const: d.is_const, tag };
             self.env.declare_local(d.name.name.clone(), info);
         }
     }

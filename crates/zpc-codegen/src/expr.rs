@@ -11,6 +11,7 @@ use zpc_ast::expr::{
 use zpc_ast::{Ident, Span};
 use zpc_diag::Diagnostics;
 use zpc_sema::fold::{Const, Folder};
+use zpc_sema::tags::TagId;
 
 use crate::emit::Generator;
 use crate::layout::{Callee, Class, ParamKind, VarInfo, VarKind};
@@ -164,9 +165,9 @@ impl Generator {
                 last
             }
             ExprKind::Cast { expr: inner, .. } => self.eval(inner),
-            ExprKind::Unary { op, operand, .. } => self.eval_unary(*op, operand),
+            ExprKind::Unary { op, operand, .. } => self.eval_unary(*op, operand, expr.span),
             ExprKind::IncDec { op, fixity, operand, .. } => {
-                self.eval_incdec(*op, *fixity, operand)
+                self.eval_incdec(*op, *fixity, operand, expr.span)
             }
             ExprKind::Binary { op, lhs, rhs, .. } => self.eval_binary(*op, lhs, rhs, expr.span),
             ExprKind::Assign { op, target, value, .. } => {
@@ -226,8 +227,12 @@ impl Generator {
 
     // -------------------------------------------------------------- unary
 
-    fn eval_unary(&mut self, op: UnOp, operand: &Expr) -> Val {
+    fn eval_unary(&mut self, op: UnOp, operand: &Expr, span: Span) -> Val {
+        let tag = self.expr_tag(operand);
         self.load(operand);
+        if self.unary_userop(op, tag, span) {
+            return Val::Expr;
+        }
         match op {
             UnOp::Neg => self.asm.emit0(Opcode::Neg),
             UnOp::LogNot => self.asm.emit0(Opcode::Not),
@@ -238,7 +243,14 @@ impl Generator {
 
     /// `inc()`/`dec()` in `sc4.c`, driven by `hier2()` (prefix) and `hier1()`
     /// (postfix).
-    fn eval_incdec(&mut self, op: IncDecOp, fixity: Fixity, operand: &Expr) -> Val {
+    fn eval_incdec(
+        &mut self,
+        op: IncDecOp,
+        fixity: Fixity,
+        operand: &Expr,
+        span: Span,
+    ) -> Val {
+        let tag = self.expr_tag(operand);
         let target = self.eval(operand);
         if !target.is_lvalue() {
             self.error(22, operand.span, &[]);
@@ -255,8 +267,10 @@ impl Generator {
         let indirect = matches!(target, Val::ArrayCell | Val::ArrayChar);
         match fixity {
             Fixity::Prefix => {
-                // inc(lval); rvalue(lval)
-                self.emit_incdec(op, &target);
+                // `if (!check_userop(user_inc,...)) inc(lval); rvalue(lval);`
+                if !self.incdec_userop(op, &target, tag, span) {
+                    self.emit_incdec(op, &target);
+                }
                 self.rvalue(&target);
             }
             Fixity::Postfix => {
@@ -268,7 +282,9 @@ impl Generator {
                     // swap.pri: stash the value, restore the address in PRI
                     self.asm.swap1();
                 }
-                self.emit_incdec(op, &target);
+                if !self.incdec_userop(op, &target, tag, span) {
+                    self.emit_incdec(op, &target);
+                }
                 if indirect {
                     self.asm.popreg(Reg::Pri);
                 }
@@ -321,8 +337,9 @@ impl Generator {
             BinOp::LogAnd => self.skim(lhs, rhs, op),
             _ if op.is_relational() => self.plnge_rel(lhs, rhs, op),
             _ => {
+                let ltag = self.expr_tag(lhs);
                 let left = self.load_operand(lhs);
-                self.plnge2(Some(op), left, rhs, span);
+                self.plnge2(Some(op), left, rhs, span, ltag);
                 Val::Expr
             }
         }
@@ -342,7 +359,16 @@ impl Generator {
 
     /// `plnge2()`: with the left operand already evaluated, evaluate the right one
     /// and apply `op`, leaving ALT = left and PRI = right.
-    fn plnge2(&mut self, op: Option<BinOp>, left: Option<i32>, rhs: &Expr, span: Span) {
+    fn plnge2(
+        &mut self,
+        op: Option<BinOp>,
+        left: Option<i32>,
+        rhs: &Expr,
+        span: Span,
+        ltag: TagId,
+    ) {
+        let mut ltag = ltag;
+        let mut rtag = self.expr_tag(rhs);
         match left {
             Some(c) => {
                 // Constant on the left; it is not yet loaded.
@@ -361,6 +387,11 @@ impl Generator {
                         // because the operator is commutative.
                         self.asm.truncate(mark);
                         self.asm.ldconst(rc, Reg::Alt);
+                        // "swap the lval variables so that lval1 is associated
+                        // with the secondary register and lval2 with the
+                        // primary" (sc3.c:569-576). `check_userop()` runs after
+                        // this swap, so it must see the swapped tags too.
+                        std::mem::swap(&mut ltag, &mut rtag);
                     }
                     Some(rc) => {
                         self.asm.ldconst(rc, Reg::Pri);
@@ -370,7 +401,9 @@ impl Generator {
                 }
             }
         }
-        if let Some(op) = op {
+        if let Some(op) = op
+            && !self.binary_userop(op, ltag, rtag, span)
+        {
             self.emit_binop(op, span);
         }
     }
@@ -439,14 +472,17 @@ impl Generator {
         operands.reverse();
         ops.reverse();
 
+        let mut ltag = self.expr_tag(operands[0]);
         let mut left = self.load_operand(operands[0]);
         for (i, o) in ops.iter().enumerate() {
             if i > 0 {
                 self.asm.relop_prefix();
-                // After relop_prefix the previous right operand is in PRI.
+                // After relop_prefix the previous right operand is in PRI, so it
+                // is the left operand of this link of the chain.
+                ltag = self.expr_tag(operands[i]);
                 left = None;
             }
-            self.plnge2(Some(*o), left, operands[i + 1], operands[i + 1].span);
+            self.plnge2(Some(*o), left, operands[i + 1], operands[i + 1].span, ltag);
             if i > 0 {
                 self.asm.relop_suffix();
             }
@@ -512,6 +548,9 @@ impl Generator {
     // ----------------------------------------------------------- assignment
 
     fn eval_assign(&mut self, op: Option<BinOp>, target: &Expr, value: &Expr, span: Span) -> Val {
+        // `a += b` is `a = a + b`, so the left operand of the arithmetic is the
+        // destination and carries its tag.
+        let ltag = self.expr_tag(target);
         let lhs = self.eval(target);
         if let Val::ArrayRef = lhs {
             return self.assign_array(target, value, op, span);
@@ -536,13 +575,13 @@ impl Generator {
                 self.asm.pushreg(Reg::Pri);
                 self.rvalue(&lhs);
             }
-            self.plnge2(op, None, value, span);
+            self.plnge2(op, None, value, span, ltag);
             if op.is_some() {
                 self.asm.popreg(Reg::Alt);
             }
         } else if op.is_some() {
             self.rvalue(&lhs);
-            self.plnge2(op, None, value, span);
+            self.plnge2(op, None, value, span, ltag);
         } else {
             // "if direct fetch and simple assignment: no push and pop needed"
             self.load(value);

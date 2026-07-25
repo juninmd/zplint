@@ -129,7 +129,10 @@ impl Generator {
                 self.fold_env =
                     std::mem::take(&mut self.fold_env).with_array(&d.name.name, dims.as_slice());
             }
-            let mut info = VarInfo { addr, class: Class::Local, kind, is_const: false };
+            let tag = self.tag_of(d.tag.as_ref());
+            self.fold_env =
+                std::mem::take(&mut self.fold_env).with_symbol_tag(&d.name.name, tag.raw() as i32);
+            let mut info = VarInfo { addr, class: Class::Local, kind, is_const: false, tag };
             info.is_const = decl.modifiers.is_const;
             self.env.declare_local(d.name.name.clone(), info.clone());
 
