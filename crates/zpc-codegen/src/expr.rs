@@ -828,7 +828,7 @@ impl Generator {
         // Descending order: this is the reordering sc7.c performs.
         for idx in (0..slots.len()).rev() {
             let kind = info.param_at(idx).map(|p| p.kind.clone()).unwrap_or(ParamKind::Value);
-            let default = info.param_at(idx).and_then(|p| p.default);
+            let default = info.param_at(idx).and_then(|p| p.default.clone());
             // An explicit `_` and an omitted argument both take the declared
             // default; the C compiler flags the first ARG_IGNORED and handles
             // both in the same fixup loop at the end of callfunction().
@@ -838,13 +838,43 @@ impl Generator {
             };
             match supplied {
                 Some(e) => heapalloc += self.push_arg(e, &kind),
+                // `...` accepts ZERO or more arguments, so an empty variadic tail
+                // is not a missing argument - it contributes nothing at all.
+                // Treating its slot as required made every call that passed no
+                // variadic arguments raise error 88, and the AMXX headers are full
+                // of those: `SQL_PrepareQuery(db, fmt, any:...)` called with just
+                // a db and a format string, `client_print(id, type, msg)`, and so on.
+                None if kind == ParamKind::VarArgs => continue,
                 None => {
                     let (sp, code) = match slots[idx] {
                         Some(a) => (a.span, 34u16),
                         None => (span, 88u16),
                     };
                     match default {
-                        Some(v) => self.asm.ldconst(v, Reg::Pri),
+                        Some(crate::layout::ArgDefault::Const(v)) => self.asm.ldconst(v, Reg::Pri),
+                        // `= sizeof other`: the size of the argument the CALLER
+                        // supplied for `other`, which is why it cannot be folded
+                        // at the declaration.
+                        Some(crate::layout::ArgDefault::SizeOfArg { index, levels }) => {
+                            let size = slots
+                                .get(index)
+                                .and_then(|s| match s {
+                                    Some(Arg { value: ArgValue::Expr(e), .. }) => Some(e),
+                                    _ => None,
+                                })
+                                .map(|e| {
+                                    let dims = self.expr_dims(e);
+                                    dims.get(levels as usize).copied().unwrap_or(1)
+                                })
+                                .unwrap_or(0);
+                            if size == 0 {
+                                // The referenced argument was itself omitted, or
+                                // has no known shape: error 17 is what declargs()
+                                // reports for an unresolvable sizeof default.
+                                self.error(17, sp, &["sizeof"]);
+                            }
+                            self.asm.ldconst(size, Reg::Pri);
+                        }
                         None => {
                             self.error(code, sp, &[]);
                             self.asm.ldconst(0, Reg::Pri);
@@ -942,3 +972,5 @@ impl crate::stream::AsmStream {
         self.emit_jump(Opcode::Call, target);
     }
 }
+
+

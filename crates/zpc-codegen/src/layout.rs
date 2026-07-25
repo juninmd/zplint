@@ -160,13 +160,28 @@ pub enum ParamKind {
     VarArgs,
 }
 
+/// What an omitted argument expands to.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ArgDefault {
+    /// A constant cell: a scalar value, or the address of an array default
+    /// parked in the data segment.
+    Const(i32),
+    /// `= sizeof other` - resolved at each CALL SITE against the argument
+    /// actually supplied for parameter `index`, not at the declaration. That
+    /// late resolution is the whole point of the `uSIZEOF` fixup at the end of
+    /// `declargs()`, and it is what makes `stock copy(dest[], len = sizeof dest)`
+    /// report the caller's buffer size. `levels` counts trailing `[]` pairs,
+    /// selecting a sub-dimension.
+    SizeOfArg { index: usize, levels: u8 },
+}
+
 /// A parameter of a declared function.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Param {
     pub name: String,
     pub kind: ParamKind,
     /// The value `_` (and an omitted trailing argument) expands to.
-    pub default: Option<i32>,
+    pub default: Option<ArgDefault>,
 }
 
 /// The callable signature codegen needs: enough to lay out the argument block.
@@ -417,3 +432,4 @@ mod tests {
         assert_eq!(info.param_at(9).unwrap().kind, ParamKind::VarArgs);
     }
 }
+

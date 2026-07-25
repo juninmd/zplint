@@ -40,7 +40,7 @@ use zpc_sema::fold::{ArrayInfo, Cell, Const, Folder, MapEnv, TagConfig};
 use zpc_sema::symbols::{SymKind, SymbolDecl, SymbolTable, Usage};
 use zpc_sema::tags::{OpKind, Overload, Overloads, TagId, Tags};
 
-use crate::layout::{Callee, Class, DataSeg, Env, FuncInfo, Param, ParamKind, VarInfo, VarKind};
+use crate::layout::{ArgDefault, Callee, Class, DataSeg, Env, FuncInfo, Param, ParamKind, VarInfo, VarKind};
 use crate::stream::{AsmStream, CELL, Item as AsmItem, LabelId, Reg};
 
 /// One entry of the loop stack: where `break` and `continue` jump, and how much
@@ -346,22 +346,32 @@ impl Generator {
                     // headers are full of exactly that shape.
                     let default = match d.default.as_ref() {
                         Some(ParamDefault::Expr(e)) => match &e.kind {
-                            ExprKind::Str(s) => Some(self.intern_literal(&self.string_cells(s))),
-                            _ => self.fold(e).map(|c| c.value),
+                            ExprKind::Str(s) => {
+                                let cells = self.string_cells(s);
+                                Some(ArgDefault::Const(self.intern_literal(&cells)))
+                            }
+                            _ => self.fold(e).map(|c| ArgDefault::Const(c.value)),
                         },
                         Some(ParamDefault::Array(init)) => {
                             let cells = self.init_cells(init, &[]);
-                            Some(self.intern_literal(&cells))
+                            Some(ArgDefault::Const(self.intern_literal(&cells)))
                         }
                         Some(ParamDefault::Symbol(id)) => {
                             // "the address of an existing global array is used
                             // directly" - no copy is made.
-                            self.env.var(&id.name).map(|v| v.addr)
+                            self.env.var(&id.name).map(|v| ArgDefault::Const(v.addr))
                         }
-                        // `= sizeof other` / `= tagof other` resolve against another
-                        // parameter after the whole list is read; not implemented,
-                        // so the parameter stays required rather than silently
-                        // receiving a wrong value.
+                        // `= sizeof other` names another PARAMETER and is resolved
+                        // per call site; record which one.
+                        Some(ParamDefault::SizeOf { arg, levels, .. }) => f
+                            .params
+                            .iter()
+                            .position(|p| {
+                                matches!(p, AstParam::Fixed(o) if o.name.name == arg.name)
+                            })
+                            .map(|index| ArgDefault::SizeOfArg { index, levels: *levels }),
+                        // `= tagof other` is not implemented, so the parameter
+                        // stays required rather than silently taking a wrong value.
                         _ => None,
                     };
                     Param { name: d.name.name.clone(), kind, default }
@@ -1064,4 +1074,6 @@ mod tests {
         assert_eq!(g.string_cells(&s), vec![0x6162_6364u32 as i32, 0]);
     }
 }
+
+
 
