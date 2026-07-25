@@ -338,10 +338,30 @@ impl Generator {
                     } else {
                         ParamKind::Value
                     };
-                    // Only a scalar default can be materialised with `ldconst`;
-                    // array, `sizeof` and `tagof` defaults are not implemented.
+                    // A scalar default is an `ldconst` of its value; an ARRAY
+                    // default is an `ldconst` of the *address* of a copy parked in
+                    // the data segment, which is what `declargs()` does with it.
+                    // Without the array case, `stock f(a, const s[] = "")` counted
+                    // `s` as required and every `f(1)` raised error 88 - the AMXX
+                    // headers are full of exactly that shape.
                     let default = match d.default.as_ref() {
-                        Some(ParamDefault::Expr(e)) => self.fold(e).map(|c| c.value),
+                        Some(ParamDefault::Expr(e)) => match &e.kind {
+                            ExprKind::Str(s) => Some(self.intern_literal(&self.string_cells(s))),
+                            _ => self.fold(e).map(|c| c.value),
+                        },
+                        Some(ParamDefault::Array(init)) => {
+                            let cells = self.init_cells(init, &[]);
+                            Some(self.intern_literal(&cells))
+                        }
+                        Some(ParamDefault::Symbol(id)) => {
+                            // "the address of an existing global array is used
+                            // directly" - no copy is made.
+                            self.env.var(&id.name).map(|v| v.addr)
+                        }
+                        // `= sizeof other` / `= tagof other` resolve against another
+                        // parameter after the whole list is read; not implemented,
+                        // so the parameter stays required rather than silently
+                        // receiving a wrong value.
                         _ => None,
                     };
                     Param { name: d.name.name.clone(), kind, default }
@@ -836,6 +856,16 @@ impl Generator {
     /// string (`!"..."`) is `sizeof(cell)/sCHARBITS*8` = 4 characters per cell, most
     /// significant byte first ("the first character in a pack occupies the highest
     /// bits of the cell", `charalign()` in `sc4.c`).
+    /// Park a literal block in the data segment and return its byte address.
+    /// Used for array parameter defaults, which are passed by address.
+    pub(crate) fn intern_literal(&mut self, cells: &[i32]) -> i32 {
+        let addr = self.data.alloc(cells.len().max(1) as i32);
+        if !cells.is_empty() {
+            self.data.init_at(addr, cells);
+        }
+        addr
+    }
+
     pub(crate) fn string_cells(&self, s: &StringLit) -> Vec<i32> {
         if s.packed {
             let bytes: Vec<u8> = s.value.bytes().chain(std::iter::once(0)).collect();
