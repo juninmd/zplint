@@ -33,6 +33,44 @@ zplint watch             # Re-lint on file save
 zplint fix               # Apply auto-fixes
 ```
 
+## Compiler
+
+`zplint compile` produces AMXX 1.10-compatible `.amxx` plugins:
+
+```bash
+zplint compile plugin.sma --include path/to/amxmodx/scripting/include
+```
+
+Release gate:
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release
+node scripts/difftest.mjs --amxxpc path/to/amxxpc.exe \
+  --include path/to/amxmodx/scripting/include --corpus path/to/amxmodx/plugins
+pwsh scripts/runtime-test.ps1
+./target/release/zplint lint
+```
+
+The differential gate compares accept/reject decisions, requires output presence
+to match the exit status, and disassembles every successful zplint artifact. It
+keeps generated files in a temporary directory. `--strict-diagnostics` additionally
+compares diagnostic tuples.
+
+The runtime gate compiles the same fixture with `amxxpc` and zplint, then loads and
+executes both in a real AMX Mod X 1.10/HLDS container. It covers public forwards,
+an asynchronous callback, native binding, globals, local and multidimensional
+arrays, recursion, by-reference arguments, floats/user operators, strings and
+switch control flow. Docker, the server image, AMXX 1.10 Linux core and reference
+`amxxpc` are required; paths can be supplied through `AMXXPC`,
+`AMXX_INCLUDE_DIR`, and `AMXX_CORE`.
+
+Measured baseline: 74/74 current official AlliedModders plugins have acceptance
+parity. Runtime reference and zplint artifacts both emit `ZPLINT_RUNTIME_PASS`.
+Generated code is not byte-identical to `amxxpc`; production rollout should still
+start as a canary and keep the runtime gate mandatory.
+
 ## Rules (106 detectors)
 
 ### Player Validation (8)

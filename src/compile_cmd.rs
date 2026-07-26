@@ -6,7 +6,7 @@
 //! `.amxx` on disk is worse than none.
 
 use std::path::{Path, PathBuf};
-use zpc_diag::{AmxxpcStyle, Diagnostics, LineIndex, Severity};
+use zpc_diag::{AmxxpcStyle, Diagnostic, Diagnostics, LineIndex, Severity, Span};
 
 /// Where compilation stopped, for reporting.
 enum Outcome {
@@ -19,20 +19,45 @@ enum Outcome {
 /// Compile `path`, writing `.amxx` next to it (or to `out` when given).
 /// Returns the process exit code: 0 on success, 1 on compile errors, 2 on I/O.
 pub fn run(path: &Path, out: Option<PathBuf>, include_dirs: Vec<PathBuf>, emit_asm: bool) -> i32 {
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    let src = match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+        },
         Err(e) => {
             eprintln!("cannot read {}: {e}", path.display());
             return 2;
         }
     };
+    let dest = out.unwrap_or_else(|| path.with_extension("amxx"));
+    let input_path = std::fs::canonicalize(path).ok();
+    let output_path = if dest.exists() {
+        std::fs::canonicalize(&dest).ok()
+    } else {
+        dest.parent()
+            .and_then(|parent| std::fs::canonicalize(parent).ok())
+            .and_then(|parent| dest.file_name().map(|name| parent.join(name)))
+    };
+    if input_path.is_some() && input_path == output_path {
+        eprintln!("output path must not overwrite source {}", path.display());
+        return 2;
+    }
+    if dest.exists()
+        && let Err(e) = std::fs::remove_file(&dest)
+    {
+        eprintln!("cannot remove stale output {}: {e}", dest.display());
+        return 2;
+    }
 
     let mut all = Diagnostics::new();
 
     // --- phase A: preprocess, then scan ---
     let mut pp = zpc_lex::Preprocessor::new(include_dirs);
     let (pre, pp_diags) = pp.process(path, &src);
-    merge(&mut all, pp_diags.into_items());
+    merge(
+        &mut all,
+        remap_preprocessor_diagnostics(pp_diags.into_items(), &pre),
+    );
     if report_and_stop(&all, &pre.text, path, Some(&pre.map)) {
         return 1;
     }
@@ -95,7 +120,6 @@ pub fn run(path: &Path, out: Option<PathBuf>, include_dirs: Vec<PathBuf>, emit_a
         }
     };
 
-    let dest = out.unwrap_or_else(|| path.with_extension("amxx"));
     match std::fs::write(&dest, &amxx) {
         Ok(()) => {
             report(&all, &pre.text, path, Some(&pre.map));
@@ -155,6 +179,42 @@ fn merge(all: &mut Diagnostics, items: impl IntoIterator<Item = zpc_diag::Diagno
     for d in items {
         all.push(d);
     }
+}
+
+/// Preprocessor spans belong to each unexpanded source file. Later diagnostics
+/// already point into `pre.text`, which is what [`report`] consumes. Translate
+/// only this first batch to expanded-line offsets so include/source names remain
+/// correct instead of being mapped through an unrelated line.
+fn remap_preprocessor_diagnostics(
+    mut items: Vec<Diagnostic>,
+    pre: &zpc_lex::preproc::Preprocessed,
+) -> Vec<Diagnostic> {
+    let mut expanded_starts = vec![0u32];
+    expanded_starts.extend(
+        pre.text
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (byte == b'\n').then_some(index as u32 + 1)),
+    );
+
+    for diagnostic in &mut items {
+        let Ok(bytes) = std::fs::read(&diagnostic.file) else {
+            continue;
+        };
+        let source = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(error) => error.into_bytes().iter().map(|&byte| byte as char).collect(),
+        };
+        let (source_line, _) = LineIndex::new(&source).line_col(diagnostic.span.start);
+        let Some(output_line) = pre.map.output_line(&diagnostic.file, source_line) else {
+            continue;
+        };
+        let Some(&offset) = expanded_starts.get(output_line) else {
+            continue;
+        };
+        diagnostic.span = Span::at(offset);
+    }
+    items
 }
 
 /// Print diagnostics in amxxpc's format so output can be diffed against it.
@@ -217,6 +277,63 @@ fn print_summary(all: &Diagnostics, outcome: Outcome, bytes: usize) {
         }
     }
     let _ = Severity::Error;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+    use std::path::PathBuf;
+
+    fn temp_path(name: &str, extension: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "zplint_compile_{name}_{}.{}",
+            std::process::id(),
+            extension
+        ))
+    }
+
+    #[test]
+    fn compiles_legacy_source_with_windows_1252_comment() {
+        let input = temp_path("windows_1252", "sma");
+        let output = temp_path("windows_1252", "amxx");
+        let source = b"// compila\xe7\xe3o\npublic plugin_init() {}\n";
+        std::fs::write(&input, source).unwrap();
+        let _ = std::fs::remove_file(&output);
+
+        let exit = run(&input, Some(output.clone()), Vec::new(), false);
+
+        assert_eq!(exit, 0);
+        assert!(std::fs::metadata(&output).unwrap().len() > 0);
+        std::fs::remove_file(input).unwrap();
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn compile_error_removes_stale_output() {
+        let input = temp_path("stale_output", "sma");
+        let output = temp_path("stale_output", "amxx");
+        std::fs::write(&input, "public plugin_init( {\n").unwrap();
+        std::fs::write(&output, b"stale plugin").unwrap();
+
+        let exit = run(&input, Some(output.clone()), Vec::new(), false);
+
+        assert_eq!(exit, 1);
+        assert!(!output.exists(), "failed compilation left a stale .amxx");
+        std::fs::remove_file(input).unwrap();
+    }
+
+    #[test]
+    fn rejects_output_that_would_overwrite_source() {
+        let input = temp_path("same_output", "sma");
+        let source = b"public plugin_init() {}\n";
+        std::fs::write(&input, source).unwrap();
+
+        let exit = run(&input, Some(input.clone()), Vec::new(), false);
+
+        assert_eq!(exit, 2);
+        assert_eq!(std::fs::read(&input).unwrap(), source);
+        std::fs::remove_file(input).unwrap();
+    }
 }
 
 

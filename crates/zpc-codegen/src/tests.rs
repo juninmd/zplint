@@ -897,6 +897,21 @@ fn a_two_dimensional_string_table_lays_its_rows_out_padded() {
 }
 
 #[test]
+fn unsized_string_table_uses_the_longest_row_for_its_minor_dimension() {
+    let unit = compile("new g[][] = {\"\", \"abcd\"}; foo() { return g[0][3]; }");
+
+    assert!(
+        !unit.diags.items().iter().any(|diagnostic| diagnostic.is_error()),
+        "{:?}",
+        unit.diags.items()
+    );
+    assert_eq!(
+        unit.data,
+        vec![8, 24, 0, 0, 0, 0, 0, b'a' as i32, b'b' as i32, b'c' as i32, b'd' as i32, 0]
+    );
+}
+
+#[test]
 fn a_two_dimensional_local_copies_the_whole_image_including_the_vector() {
     // The index vector is part of the array's storage, so declloc()'s memcopy
     // covers calc_arraysize() cells, not just the elements.
@@ -1164,6 +1179,45 @@ fn an_operator_body_does_not_recurse_into_itself() {
     let ops = crate::stream::opcodes(&unit.code);
     assert!(ops.contains(&Opcode::Add), "the built-in opcode must stand:\n{ops:?}");
     assert!(!ops.contains(&Opcode::Call), "{ops:?}");
+}
+
+#[test]
+fn transitive_stock_chain_is_emitted_to_a_fixed_point() {
+    let src = "
+        stock first() return second();
+        stock second() return third();
+        stock third() return fourth();
+        stock fourth() return 4;
+        public plugin_init() return first();
+    ";
+
+    let rendered = normalised(src);
+
+    assert_eq!(rendered.matches("proc").count(), 5, "{rendered}");
+}
+
+#[test]
+fn native_cannot_be_redefined_by_a_stock_body() {
+    let unit = compile(
+        "native write_coord_f(Float:value);
+         stock write_coord_f(Float:value) return 0;",
+    );
+    let codes: Vec<u16> =
+        unit.diags.items().iter().filter(|diagnostic| diagnostic.is_error()).map(|d| d.code).collect();
+
+    assert!(codes.contains(&21), "expected error 21, got {codes:?}");
+}
+
+#[test]
+fn forward_after_stock_definition_is_allowed() {
+    let unit = compile(
+        "stock alive_count() return 1;
+         forward alive_count();
+         main() return alive_count();",
+    );
+    let errors: Vec<_> = unit.diags.items().iter().filter(|d| d.is_error()).collect();
+
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
 }
 
 #[test]

@@ -524,6 +524,7 @@ fn collect_calls(sanitized: &[String], local: &HashSet<String>) -> Vec<Call> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

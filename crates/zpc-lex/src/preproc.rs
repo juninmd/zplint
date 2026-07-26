@@ -173,6 +173,14 @@ impl LineMap {
             .map(|&(f, l)| (self.files[f as usize].as_path(), l))
     }
 
+    /// First expanded-text line produced by `source_line` in `file`.
+    pub fn output_line(&self, file: &Path, source_line: u32) -> Option<usize> {
+        let file_id = self.files.iter().position(|candidate| candidate == file)? as u32;
+        self.lines
+            .iter()
+            .position(|&(candidate, line)| candidate == file_id && line == source_line)
+    }
+
     /// Number of output lines recorded.
     pub fn len(&self) -> usize {
         self.lines.len()
@@ -491,6 +499,14 @@ impl Preprocessor {
         self.define("__LINE__", &src_line.to_string());
         match self.command(&line, span, entry_iflevel) {
             Cmd::None => {
+                // `#pragma deprecated` targets the next declaration or `#define`.
+                // Declarations are ordinary source lines handled after this
+                // preprocessor, so the macro-only pending state must stop here;
+                // otherwise it leaks across the declaration and marks an
+                // unrelated later macro as deprecated.
+                if line.iter().any(|byte| *byte > b' ') {
+                    self.pending_deprecate = None;
+                }
                 self.subst_all(&mut line, span);
                 let text = String::from_utf8_lossy(&line).replace('\u{7}', "");
                 self.push_line(text.trim_end(), src_line);
@@ -1287,6 +1303,19 @@ impl Preprocessor {
             } else {
                 built.push(subst[e]);
                 e += 1;
+            }
+        }
+
+        // A disabled assertion-style macro is commonly defined with an empty
+        // replacement and invoked as `MACRO(...);`. amxxpc consumes that
+        // statement terminator with the empty expansion; leaving it behind
+        // creates a synthetic bare `;` and a false error 036.
+        if built.is_empty() && line[..at_idx].iter().all(|byte| *byte <= b' ') {
+            let semicolon = skip_ws(line, s);
+            if line.get(semicolon) == Some(&b';')
+                && line[semicolon + 1..].iter().all(|byte| *byte <= b' ')
+            {
+                s = line.len();
             }
         }
 
@@ -2241,6 +2270,33 @@ mod tests {
         let (_, d) = run("#pragma deprecated Use B instead\n#define A 1\nx = A;\n");
         assert_eq!(codes(&d), [233]);
         assert!(d.items()[0].message.contains("Use B instead"));
+    }
+
+    #[test]
+    fn pragma_deprecated_for_a_declaration_does_not_leak_to_a_later_macro() {
+        let (_, d) = run(
+            "#pragma deprecated Use replacement instead\n\
+             native old_api();\n\
+             #define UNRELATED 1\n\
+             x = UNRELATED;\n",
+        );
+        assert!(
+            !codes(&d).contains(&233),
+            "declaration deprecation leaked to an unrelated macro"
+        );
+    }
+
+    #[test]
+    fn empty_statement_macro_consumes_its_trailing_semicolon() {
+        let (out, d) = run(
+            "#define ASSERT_DBG(%1,%2)\n\
+             public f() {\n\
+             ASSERT_DBG(1, \"ok\");\n\
+             }\n",
+        );
+
+        assert!(codes(&d).is_empty());
+        assert_eq!(body(&out), ["public f() {", "}"]);
     }
 
     #[test]

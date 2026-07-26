@@ -331,6 +331,18 @@ impl Generator {
             },
         };
 
+        if let Some(existing) = self.env.func(&name)
+            && existing.defined
+            && f.body.is_some()
+        {
+            // A native is already defined by the host, and an ordinary function
+            // may only have one body. A declaration after a body is legal:
+            // AMXX headers commonly provide a stock and plugins may repeat its
+            // signature as a forward.
+            self.error(21, span, &[&name]);
+            return;
+        }
+
         let params: Vec<Param> = f
             .params
             .iter()
@@ -776,12 +788,12 @@ impl Generator {
         // the others at 0, so `sizeof t[]` folded to 0 and a `case 1 .. sizeof t[]:`
         // became an invalid range.
         if let Some(init) = d.init.as_ref() {
-            for level in 0..dims.len() {
-                if dims[level] != 0 {
+            for (level, dim) in dims.iter_mut().enumerate() {
+                if *dim != 0 {
                     continue;
                 }
                 if let Some(n) = self.init_len_at(init, level) {
-                    dims[level] = n;
+                    *dim = n;
                 }
             }
         }
@@ -792,17 +804,19 @@ impl Generator {
     /// brace, level 1 its first sub-list, and so on. `None` when the initialiser is
     /// not nested that deep, which leaves the dimension unknown rather than guessing.
     ///
-    /// Only the *first* sub-list is measured at each level - a ragged initialiser is
-    /// a different matter (error 47), reported elsewhere.
+    /// Every sub-list is measured and the widest one wins. String tables commonly
+    /// start with `""`; using only that first row deduces a minor dimension of 1
+    /// and falsely rejects valid indexes into every longer row.
     fn init_len_at(&mut self, init: &Init, level: usize) -> Option<i32> {
         if level == 0 {
             return Some(self.init_len(init));
         }
         match init {
-            Init::List(l) => {
-                let first = l.elems.first()?;
-                self.init_len_at(first, level - 1)
-            }
+            Init::List(l) => l
+                .elems
+                .iter()
+                .filter_map(|element| self.init_len_at(element, level - 1))
+                .max(),
             Init::Expr(_) => None,
         }
     }
@@ -1080,12 +1094,9 @@ impl Generator {
 /// Every identifier named anywhere in the unit *except* inside an unreferenced
 /// `stock` body, plus the names of non-`stock` functions themselves.
 ///
-/// Used to decide which `stock`s to emit. This is deliberately a fixed point over
-/// two rounds rather than a full reachability analysis: round one collects from
-/// non-`stock` code, round two adds anything named by the `stock`s that survived,
-/// which covers the one case that matters in practice - a used stock calling
-/// another stock. A deeper chain keeps more than upstream would, which costs dead
-/// code but never drops something that is needed.
+/// Used to decide which `stock`s to emit. Closure continues to a fixed point:
+/// real include stacks contain chains deeper than two stocks, and stopping early
+/// emits a caller while dropping its callee, leaving an undefined AMX label.
 fn collect_referenced_names(program: &Program) -> std::collections::HashSet<String> {
     use std::collections::HashSet;
 
@@ -1097,8 +1108,9 @@ fn collect_referenced_names(program: &Program) -> std::collections::HashSet<Stri
             other => collect_names_in_item(other, &mut names),
         }
     }
-    // Two rounds of closure over the stocks that are now live.
-    for _ in 0..2 {
+    // Closure over every stock that became live in the preceding pass.
+    loop {
+        let before = names.len();
         let live: Vec<&Item> = program
             .items
             .iter()
@@ -1112,6 +1124,9 @@ fn collect_referenced_names(program: &Program) -> std::collections::HashSet<Stri
             .collect();
         for item in live {
             collect_names_in_item(item, &mut names);
+        }
+        if names.len() == before {
+            break;
         }
     }
     names

@@ -3,10 +3,11 @@
 > Plano de migração do `amxxpc` (C, ~23k LOC, parado há ~5 anos) para um compilador
 > Rust moderno embutido no zplint.
 >
-> **Status: EM ANDAMENTO.** Ver a tabela de progresso na §8. O oráculo diferencial
-> ainda **não roda** (não há `amxxpc.exe` nesta máquina), então nenhuma paridade está
-> provada — só os testes próprios passam. Divergências deliberadas e correções de
-> premissa ficam em `docs/DIVERGENCES.md`.
+> **Status: CANARY PRODUTIVO.** O oráculo diferencial roda contra `amxxpc` 1.10,
+> com paridade de aceitação no corpus oficial e no corpus real `01`–`06`. Artefatos
+> dos dois compiladores também carregam e executam no AMXX 1.10/HLDS. Paridade
+> byte a byte e paridade diagnóstica total não são objetivos já atingidos.
+> Divergências deliberadas ficam em `docs/DIVERGENCES.md`.
 
 ## 0. Objetivo e não-objetivos
 
@@ -191,9 +192,9 @@ desligável com `[rules] ast = false`.
   de erro melhor.
 
 ### Bloqueadores
-1. **Sem `amxxpc.exe`** → o oráculo não roda. É o item de maior risco do projeto:
-   sem ele, "paridade" é afirmação não verificada.
-2. **Licença do zplint indefinida** → ver `docs/LICENSING.md` §5.
+1. **Licença do zplint indefinida** → ver `docs/LICENSING.md` §5.
+2. **Paridade diagnóstica incompleta** → o corpus legado `amxmod_compat` é rejeitado
+   pelos dois compiladores, mas a cascata de diagnósticos ainda difere.
 
 
 ---
@@ -207,7 +208,7 @@ como oráculo:
 |---|---|---|
 | plugins que compilam | **0 / 74** | **74 / 74** |
 | erros de compilação | 8476 | **0** |
-| testes do workspace | 555 | 649, 0 falhas |
+| testes do workspace | 555 | 660, 0 falhas |
 | baseline do linter | 0 erros | 0 erros (mantido) |
 
 **Paridade de aceitação atingida**: o `amxxpc` de referência também compila 74/74 com o
@@ -242,9 +243,13 @@ maiores saltos foram o #8 (20→49 plugins) e o #16 (72→74).
 **Provado**: paridade de *aceitação* — mesmo corpus, mesmo veredito, medido contra o
 binário de referência.
 
-**Não provado**: equivalência de *saída*. Os `.amxx` diferem em tamanho (codegen e
-cobertura de peephole diferentes; ver §3 de `DIVERGENCES.md`, que já previa isso).
-**Nenhum `.amxx` gerado por nós foi carregado num servidor CS 1.6.**
+**Provado por smoke runtime**: artefatos gerados por `amxxpc` e zplint carregam no
+AMXX 1.10/HLDS e executam callback assíncrono, natives, arrays, strings, floats,
+recursão e controle de fluxo, emitindo o mesmo marcador de sucesso.
+
+**Não provado**: equivalência de *saída* para todo plugin. Os `.amxx` diferem em
+tamanho (codegen e cobertura de peephole diferentes; ver §3 de `DIVERGENCES.md`).
+Por isso a troca deve começar em canário, mantendo `amxxpc` como fallback.
 
 "Melhor que o amxxpc" se apoia nos 6 bugs do compilador original documentados em
 `DIVERGENCES.md` §1 — macro auto-recursiva que trava, ciclo de include que estoura a
@@ -253,7 +258,7 @@ peephole com mnemônico inexistente, e um marcador de registrador morto que o up
 confia e nós provamos por análise de liveness.
 
 ### Infraestrutura de validação
-- `scripts/difftest.mjs` — oráculo diferencial. O `amxxpc` 1.10.0 está em
-  `.../ztest/cstrike/addons/amxmodx/scripting/amxxpc.exe`.
+- `scripts/difftest.mjs` — oráculo diferencial de aceitação, artefato e disassembly.
+- `scripts/runtime-test.ps1` — execução comparativa em AMXX 1.10/HLDS.
 - `crates/zpc-asm/src/disasm.rs` — disassembly normalizado, independente de layout.
 - `crates/zpc/tests/fixtures/` — Pawn escrito à mão cobrindo as armadilhas conhecidas.

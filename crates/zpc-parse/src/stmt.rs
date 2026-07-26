@@ -208,8 +208,12 @@ impl Parser<'_> {
         self.bump();
         let cond = self.parse_paren_cond();
         let then_branch = Box::new(self.parse_stmt_nodecl());
-        let else_branch =
-            self.eat(&TokenKind::Else).then(|| Box::new(self.parse_stmt_nodecl()));
+        let else_branch = self.eat(&TokenKind::Else).then(|| {
+            if self.at(&TokenKind::LParen) {
+                self.error(1, self.cur_span(), &["statement", "("]);
+            }
+            Box::new(self.parse_stmt_nodecl())
+        });
         Stmt::If { cond, then_branch, else_branch, span: start.to(self.prev_span()) }
     }
 
@@ -721,6 +725,12 @@ mod tests {
         assert!(inner.is_some(), "the final else belongs to the inner if");
     }
 
+    #[test]
+    fn else_cannot_introduce_a_parenthesized_condition() {
+        let (_, codes) = body_of("if (a) foo()\nelse (b) bar()");
+        assert!(codes.contains(&1), "expected invalid statement, got {codes:?}");
+    }
+
     // -------------------------------------------------- optional semicolons
 
     #[test]
@@ -935,6 +945,25 @@ mod tests {
         assert_eq!(bodies.len(), 4, "control_flow, expressions, labels_and_goto, plugin_init");
         // labels_and_goto: `loop:` is a label and `goto loop` finds it.
         assert!(bodies[2].stmts.iter().any(|s| matches!(s, Stmt::Label { .. })));
+    }
+
+    #[test]
+    fn standalone_compound_block_can_follow_an_expression_statement() {
+        let src = "
+            public f() {
+                before()
+                {
+                    new value
+                    after(value)
+                }
+            }
+        ";
+        let mut lex_diags = Diagnostics::new();
+        let tokens = Scanner::new(src, "t.sma").scan(&mut lex_diags);
+        let (_, parse_diags) = crate::parse(src, &tokens, "t.sma");
+
+        assert_eq!(lex_diags.error_count(), 0);
+        assert_eq!(parse_diags.error_count(), 0, "{:?}", parse_diags.items());
     }
 
     #[test]

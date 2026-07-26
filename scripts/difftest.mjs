@@ -1,16 +1,16 @@
-// Differential oracle: compile a corpus with the reference amxxpc and with zpc,
-// then diff the results. This is the harness the whole migration is validated by
-// (docs/COMPILER_MIGRATION.md section 2).
+// Differential acceptance oracle: compile one corpus with reference amxxpc and
+// zplint, then compare accept/reject decisions and validate every emitted zplint
+// artifact through its disassembler. Outputs stay in a temporary directory.
 //
 // Usage:
-//   node scripts/difftest.mjs --amxxpc <path-to-amxxpc.exe> --include <dir> [--zpc <path>] [--corpus <dir>] [--record]
+//   node scripts/difftest.mjs --amxxpc <path> --include <dir> [--zpc <path>] [--corpus <dir>]
 //
-//   --record   only run amxxpc and save its output as the baseline (useful before
-//              zpc can compile anything, so the oracle exists from day one)
-//
-// Exit code is non-zero when any file diverges, so this can gate CI.
+// Optional:
+//   --strict-diagnostics  also require identical diagnostic tuples
+//   --record              only run amxxpc and save normalised output as baseline
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -26,49 +26,61 @@ const ZPC = arg('zpc', 'target/release/zplint.exe');
 const CORPUS = arg('corpus', 'crates/zpc/tests/fixtures');
 const BASELINE = arg('baseline', 'crates/zpc/tests/baseline');
 const RECORD = flag('record');
+const STRICT_DIAGNOSTICS = flag('strict-diagnostics');
 
 if (!AMXXPC) {
-  console.error('error: --amxxpc <path> is required (the reference compiler is the oracle)');
-  console.error('       amxxpc ships with AMX Mod X; point at its scripting/amxxpc.exe');
+  console.error('error: --amxxpc <path> is required (reference compiler oracle)');
   process.exit(2);
 }
-if (!fs.existsSync(AMXXPC)) {
-  console.error(`error: amxxpc not found at ${AMXXPC}`);
+for (const [label, value] of [['amxxpc', AMXXPC], ['corpus', CORPUS]]) {
+  if (!fs.existsSync(value)) {
+    console.error(`error: ${label} not found at ${value}`);
+    process.exit(2);
+  }
+}
+if (!RECORD && !fs.existsSync(ZPC)) {
+  console.error(`error: zplint binary not found at ${ZPC}; build release or pass --zpc`);
   process.exit(2);
 }
 
-/** Collect .sma files recursively. */
 function collect(dir) {
   const out = [];
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) out.push(...collect(p));
-    else if (e.name.endsWith('.sma')) out.push(p);
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const candidate = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...collect(candidate));
+    else if (entry.name.endsWith('.sma')) out.push(candidate);
   }
-  return out;
+  return out.sort();
 }
 
-/**
- * amxxpc bakes absolute paths and a timestamp into its output. Normalise both so a
- * diff shows real semantic differences instead of environment noise.
- */
 function normalise(text, file) {
   return text
     .replaceAll('\\', '/')
     .replaceAll(path.resolve(file).replaceAll('\\', '/'), '<SRC>')
     .replace(/^.*?([^/]+\.(?:sma|inc))\(/gm, '$1(')
     .replace(/\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2}/g, '<TIME>')
-    .split('\n').map(l => l.trimEnd()).filter(l => l !== '')
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(Boolean)
     .join('\n');
 }
 
-function runCompiler(exe, args, cwd) {
-  const r = spawnSync(exe, args, { cwd, encoding: 'utf8', timeout: 60_000 });
+function diagnostics(text, file) {
+  return normalise(text, file)
+    .split('\n')
+    .filter(line => /\(\d+\) : (?:fatal )?(?:error|warning) \d{3}:/.test(line));
+}
+
+function run(exe, args) {
+  const result = spawnSync(exe, args, {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
   return {
-    stdout: r.stdout ?? '',
-    stderr: r.stderr ?? '',
-    code: r.status ?? -1,
-    failed: r.error ? String(r.error) : null,
+    text: (result.stdout ?? '') + (result.stderr ?? ''),
+    code: result.status ?? -1,
+    failed: result.error ? String(result.error) : null,
   };
 }
 
@@ -78,55 +90,95 @@ if (files.length === 0) {
   process.exit(2);
 }
 
-fs.mkdirSync(BASELINE, { recursive: true });
+const work = fs.mkdtempSync(path.join(os.tmpdir(), 'zplint-difftest-'));
+process.on('exit', () => fs.rmSync(work, { recursive: true, force: true }));
+if (RECORD) fs.mkdirSync(BASELINE, { recursive: true });
 
-let diverged = 0, recorded = 0, compared = 0;
+let diverged = 0;
+let recorded = 0;
 const report = [];
 
-for (const file of files) {
-  const outAmx = path.join(BASELINE, path.basename(file, '.sma') + '.ref.amxx');
-  const refArgs = ['-o' + outAmx];
-  if (INCLUDE) refArgs.push('-i' + INCLUDE);
+for (const [index, file] of files.entries()) {
+  const stem = `${String(index).padStart(4, '0')}-${path.basename(file, '.sma')}`;
+  const refOutput = path.join(work, `${stem}.ref.amxx`);
+  const ourOutput = path.join(work, `${stem}.ours.amxx`);
+  const refArgs = [`-o${refOutput}`];
+  if (INCLUDE) refArgs.push(`-i${INCLUDE}`);
   refArgs.push(file);
 
-  const ref = runCompiler(AMXXPC, refArgs, process.cwd());
-  const refText = normalise(ref.stdout + ref.stderr, file);
-  const refPath = path.join(BASELINE, path.basename(file, '.sma') + '.ref.txt');
-
+  const ref = run(AMXXPC, refArgs);
   if (RECORD) {
-    fs.writeFileSync(refPath, refText);
+    fs.writeFileSync(
+      path.join(BASELINE, `${stem}.ref.txt`),
+      normalise(ref.text, file),
+    );
     recorded++;
-    console.log(`recorded  ${path.basename(file)}  (exit ${ref.code}, ${refText.split('\n').length} diag line(s))`);
     continue;
   }
 
-  if (!fs.existsSync(ZPC)) {
-    console.error(`error: zpc binary not found at ${ZPC} - build it or pass --zpc, or use --record`);
-    process.exit(2);
+  const ourArgs = ['compile', file, '--output', ourOutput];
+  if (INCLUDE) ourArgs.push('--include', INCLUDE);
+  const ours = run(ZPC, ourArgs);
+  const reasons = [];
+  const refAccepted = ref.code === 0;
+  const ourAccepted = ours.code === 0;
+
+  if (ref.failed) reasons.push(`amxxpc process failed: ${ref.failed}`);
+  if (ours.failed) reasons.push(`zplint process failed: ${ours.failed}`);
+  if (refAccepted !== ourAccepted) {
+    reasons.push(`acceptance differs: amxxpc=${ref.code}, zplint=${ours.code}`);
   }
 
-  const ours = runCompiler(ZPC, ['compile', file, '--include', INCLUDE ?? ''], process.cwd());
-  const ourText = normalise(ours.stdout + ours.stderr, file);
-  compared++;
+  const refArtifact = fs.existsSync(refOutput) && fs.statSync(refOutput).size > 0;
+  const ourArtifact = fs.existsSync(ourOutput) && fs.statSync(ourOutput).size > 0;
+  if (refArtifact !== refAccepted) {
+    reasons.push(`amxxpc artifact invariant failed: accepted=${refAccepted}, artifact=${refArtifact}`);
+  }
+  if (ourArtifact !== ourAccepted) {
+    reasons.push(`zplint artifact invariant failed: accepted=${ourAccepted}, artifact=${ourArtifact}`);
+  }
 
-  if (ourText !== refText) {
+  if (ourAccepted) {
+    const disasm = run(ZPC, ['disasm', ourOutput, '--normalised']);
+    if (disasm.code !== 0) {
+      reasons.push(`zplint artifact does not disassemble: exit=${disasm.code}`);
+    }
+  }
+
+  if (STRICT_DIAGNOSTICS) {
+    const refDiags = diagnostics(ref.text, file);
+    const ourDiags = diagnostics(ours.text, file);
+    if (JSON.stringify(refDiags) !== JSON.stringify(ourDiags)) {
+      reasons.push('diagnostics differ');
+    }
+  }
+
+  if (reasons.length > 0) {
     diverged++;
-    report.push({ file, refText, ourText, refCode: ref.code, ourCode: ours.code });
+    report.push({ file, reasons, ref, ours });
   }
 }
 
 if (RECORD) {
-  console.log(`\nbaseline recorded for ${recorded} file(s) in ${BASELINE}`);
+  console.log(`baseline recorded for ${recorded} file(s) in ${BASELINE}`);
   process.exit(0);
 }
 
-for (const r of report) {
-  console.log(`\n=== DIVERGED: ${r.file} (amxxpc exit ${r.refCode}, zpc exit ${r.ourCode}) ===`);
-  console.log('--- amxxpc ---');
-  console.log(r.refText || '(no output)');
-  console.log('--- zpc ---');
-  console.log(r.ourText || '(no output)');
+for (const result of report) {
+  console.log(`\n=== DIVERGED: ${result.file} ===`);
+  for (const reason of result.reasons) console.log(`- ${reason}`);
+  console.log(`  amxxpc exit ${result.ref.code}; zplint exit ${result.ours.code}`);
+  if (
+    result.reasons.some(reason => reason.startsWith('acceptance differs')) ||
+    (STRICT_DIAGNOSTICS && result.reasons.includes('diagnostics differ'))
+  ) {
+    console.log('--- amxxpc diagnostics ---');
+    console.log(diagnostics(result.ref.text, result.file).join('\n') || '(none)');
+    console.log('--- zplint diagnostics ---');
+    console.log(diagnostics(result.ours.text, result.file).join('\n') || '(none)');
+  }
 }
 
-console.log(`\n${compared - diverged}/${compared} matched, ${diverged} diverged`);
+const gate = STRICT_DIAGNOSTICS ? 'strict differential cases' : 'acceptance cases';
+console.log(`\n${files.length - diverged}/${files.length} ${gate} matched; ${diverged} diverged`);
 process.exit(diverged === 0 ? 0 : 1);

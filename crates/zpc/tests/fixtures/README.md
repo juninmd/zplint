@@ -11,13 +11,13 @@ shows up as a failing fixture rather than as a silently wrong `.amxx`.
 | `decl_edge_cases.sma` | Tagged enums, `(<<= 1)` step enums, enum members with array sizes, every variable form, default/by-ref/const/rest arguments, operator overloads |
 | `stmt_expr_edge_cases.sma` | Full statement set, braceless bodies, `case 1..5` and multi-value cases, the whole precedence ladder, `goto`/labels, tag casts |
 
-## Why these are not compiled by CI yet
+## End-to-end gates
 
-The differential oracle (running the real `amxxpc` over the same inputs and diffing
-its diagnostics and bytecode against ours) is **not** wired up: `amxxpc` is not
-installed on this machine. Until it is, these fixtures are used as *parser/lexer*
-inputs — they must lex and parse without spurious diagnostics — rather than as
-end-to-end compile comparisons.
+`scripts/difftest.mjs` compiles a selected corpus with real `amxxpc` and zplint,
+compares acceptance, checks output invariants, and disassembles every successful
+zplint artifact. `--strict-diagnostics` also compares diagnostics.
 
-When an `amxxpc` binary becomes available, point the harness at it and these same
-files become the first differential cases. See `docs/COMPILER_MIGRATION.md` §2.
+`../runtime/compiler_smoke.sma` is compiled by both compilers and executed through
+`scripts/runtime-test.ps1` in AMX Mod X 1.10/HLDS. Its PASS marker is emitted only
+after forwards, callback dispatch, native calls, arrays, recursion, by-reference
+arguments, floats, strings, and control flow complete successfully.

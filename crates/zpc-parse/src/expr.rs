@@ -500,6 +500,12 @@ impl<'a> Parser<'a> {
         let mut suffixed = false;
 
         loop {
+            // With optional semicolons, a physical newline terminates the
+            // expression. In particular, `{` on the next line is a standalone
+            // compound statement, not Pawn's packed-array `{index}` suffix.
+            if self.tok().line_start {
+                break;
+            }
             let kind = match self.peek() {
                 TokenKind::LBracket => IndexKind::Cell,
                 TokenKind::LBrace => IndexKind::Char,
