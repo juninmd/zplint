@@ -17,7 +17,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "zplint", about = "Lightning-fast linter for ZP5.0 AMXX plugins")]
+#[command(
+    name = "zplint",
+    version,
+    about = "Lightning-fast linter for ZP5.0 AMXX plugins"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

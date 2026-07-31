@@ -1,10 +1,17 @@
 [package]
 name = "zpc-parse"
-version = "0.1.0"
-edition = "2024"
 description = "Parser producing the zpc AST"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-zpc-diag = { path = "../zpc-diag" }
-zpc-lex = { path = "../zpc-lex" }
-zpc-ast = { path = "../zpc-ast" }
+zpc-diag.workspace = true
+zpc-lex.workspace = true
+zpc-ast.workspace = true

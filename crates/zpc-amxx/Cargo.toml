@@ -1,9 +1,16 @@
 [package]
 name = "zpc-amxx"
-version = "0.1.0"
-edition = "2024"
 description = ".amxx container writer (format reimplemented from spec)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-zpc-diag = { path = "../zpc-diag" }
+zpc-diag.workspace = true
 flate2 = "1"

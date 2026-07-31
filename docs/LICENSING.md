@@ -68,20 +68,26 @@ Antes de abrir PR com código derivado de upstream:
       (spec, hexdump, comportamento observado) e afirma que nenhum código GPL foi consultado
       linha-a-linha.
 
-## 5. Decisão em aberto: licença do zplint
+## 5. Decisão tomada: zplint é Apache-2.0
 
-Estado atual: **sem arquivo `LICENSE` no repositório** e **sem campo `license` no
-`Cargo.toml` raiz**. Sem isso, por padrão o código é "todos os direitos reservados" —
-terceiros não têm permissão para usar, e publicar no crates.io exige `license` ou
-`license-file`.
+**Estado atual (decidido pelo dono):** o zplint é licenciado sob a **Apache License, Version
+2.0**. O arquivo `LICENSE` existe na raiz com o texto integral, e `license = "Apache-2.0"` está
+declarado em `[workspace.package]` do `Cargo.toml` raiz, herdado pelos 10 pacotes publicáveis.
 
-Restrição vinda do código zlib que passaremos a distribuir: a licença zlib é permissiva e
+Como cada `.crate` enviado ao crates.io é uma **distribuição de fonte independente**, cada
+diretório em `crates/*` carrega sua própria cópia de `LICENSE` e de `NOTICE`. O `NOTICE`
+reproduz o aviso da CompuPhase verbatim — a condição 3 da §3 proíbe removê-lo de qualquer
+distribuição de fonte. **Não apague esses arquivos** ao mexer em `crates/*`.
+
+O histórico da decisão fica registrado abaixo, porque a restrição herdada continua valendo.
+
+Restrição vinda do código zlib que distribuímos: a licença zlib é permissiva e
 **compatível com praticamente qualquer escolha** — MIT, Apache-2.0, MIT/Apache dual (padrão
 Rust), BSD, zlib, GPL, ou proprietária. Ela **não impõe** copyleft. O que ela impõe, em
 qualquer cenário, são as 3 condições da §3 — que continuam valendo por cima da licença que o
 dono escolher.
 
-Consequência prática, sem recomendar nenhuma opção:
+Consequência prática das opções que estavam na mesa (a escolhida foi Apache-2.0):
 
 | Escolha | Efeito sobre as obrigações da §3 |
 |---|---|
@@ -93,10 +99,11 @@ Cuidado adicional: **nada disso muda se algum dia código GPL do AMX Mod X entra
 Se entrar, a distribuição inteira passa a ter obrigações de copyleft. É exatamente por isso que
 existe a regra da §1.
 
-**Ações que só o dono pode decidir:**
-1. Qual licença o zplint adota.
-2. Criar o arquivo `LICENSE` correspondente na raiz.
-3. Preencher `license = "..."` (ou `license-file`) no `Cargo.toml` raiz e nos crates de
-   `crates/*`.
+**Ações decididas pelo dono e já executadas:**
+1. ✅ Licença adotada: Apache-2.0.
+2. ✅ `LICENSE` (texto integral) e `NOTICE` na raiz, e uma cópia de ambos em cada `crates/*`.
+3. ✅ `license = "Apache-2.0"` em `[workspace.package]`, herdado pelos 10 pacotes.
+4. ✅ Seção *License* do `README.md` corrigida — ela afirmava "MIT" sem que houvesse
+   qualquer arquivo de licença no repo.
 
-Este documento **não escolhe** por ele e nenhum arquivo `LICENSE` foi criado.
+O passo a passo de publicação no crates.io está em [`PUBLISHING.md`](PUBLISHING.md).

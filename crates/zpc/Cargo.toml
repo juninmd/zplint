@@ -1,15 +1,22 @@
 [package]
 name = "zpc"
-version = "0.1.0"
-edition = "2024"
 description = "Driver tying the zpc Pawn compiler phases together"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-zpc-diag = { path = "../zpc-diag" }
-zpc-lex = { path = "../zpc-lex" }
-zpc-ast = { path = "../zpc-ast" }
-zpc-parse = { path = "../zpc-parse" }
-zpc-sema = { path = "../zpc-sema" }
-zpc-codegen = { path = "../zpc-codegen" }
-zpc-asm = { path = "../zpc-asm" }
-zpc-amxx = { path = "../zpc-amxx" }
+zpc-diag.workspace = true
+zpc-lex.workspace = true
+zpc-ast.workspace = true
+zpc-parse.workspace = true
+zpc-sema.workspace = true
+zpc-codegen.workspace = true
+zpc-asm.workspace = true
+zpc-amxx.workspace = true

@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build binaries for (e.g. v0.3.0)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage archive
+        shell: bash
+        run: |
+          name="zplint-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp LICENSE NOTICE README.md ATTRIBUTION.md "dist/$name/"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.target }}/release/zplint.exe" "dist/$name/"
+            (cd dist && 7z a "$name.zip" "$name")
+          else
+            cp "target/${{ matrix.target }}/release/zplint" "dist/$name/"
+            (cd dist && tar czf "$name.tar.gz" "$name")
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+          generate_release_notes: true

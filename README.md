@@ -1,5 +1,10 @@
 # zplint 🔍
 
+[![CI](https://github.com/juninmd/zplint/actions/workflows/ci.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/zplint.svg)](https://crates.io/crates/zplint)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/rustc-1.87%2B-orange.svg)](#install)
+
 Lightning-fast linter for **Pawn / AMX Mod X** plugins (CS 1.6), with deep **Zombie Plague 5.0** support.  
 Scans `.sma` files for **106 detectors**: compile errors before you compile, runtime-crash patterns
 (HLDS `svc_bad` / segfault / run time errors 3/4/10/11), engine limits (precache/edicts/netchan),
@@ -16,8 +21,19 @@ Validated against two corpora: the official `alliedmodders/amxmodx` bundled plug
 
 ## Install
 
+Requires Rust **1.87+** (edition 2024).
+
+From crates.io:
+
 ```bash
-git clone https://github.com/your/zplint
+cargo install zplint
+zplint --help
+```
+
+From source:
+
+```bash
+git clone https://github.com/juninmd/zplint
 cd zplint
 cargo build --release
 ./target/release/zplint --help
@@ -262,4 +278,14 @@ Non-UTF8 (Windows-1252) legacy files are decoded, not skipped.
 
 ## License
 
-MIT
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+The `zpc` compiler subproject contains code derived from the Pawn compiler by ITB CompuPhase
+(zlib-style licence). **zpc is an altered version** of that software, not the original, and
+its defects are ours. The upstream notice travels with every source distribution in
+[`NOTICE`](NOTICE); per-component provenance is in [`ATTRIBUTION.md`](ATTRIBUTION.md) and the
+engineering rules that keep GPL code out of this repository are in
+[`docs/LICENSING.md`](docs/LICENSING.md).
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in this work shall be licensed as above, without any additional terms or conditions.

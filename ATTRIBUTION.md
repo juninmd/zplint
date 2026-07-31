@@ -109,8 +109,20 @@ CompuPhase zlib code and must be treated separately:
 
 ---
 
-## 5. Status of zplint's own licence
+## 5. zplint's own licence
 
-At the time of writing, this repository has **no `LICENSE` file** and the root `Cargo.toml` has
-**no `license` field**. That is an open decision for the project owner — see
-`docs/LICENSING.md` §5. Nothing in this file grants anyone a licence to zplint's own code.
+zplint is licensed under the **Apache License, Version 2.0**. The full text is in the `LICENSE`
+file at the repository root, and `license = "Apache-2.0"` is declared in `[workspace.package]`
+of the root `Cargo.toml`, inherited by every publishable crate.
+
+The Apache-2.0 grant covers zplint's own code. It does **not** override the obligations
+recorded in this file: the CompuPhase zlib conditions in §1 continue to apply to the derived
+code regardless of the licence we chose, and the GPL boundary in §3 continues to apply to
+AMX Mod X.
+
+Because every crate published to crates.io is an independent source distribution, each
+directory under `crates/` carries its own copy of `LICENSE` and of `NOTICE` — the latter
+reproduces the CompuPhase notice verbatim, satisfying condition 3 of §1. Do not remove them.
+
+See `docs/LICENSING.md` for the engineering rules and `docs/PUBLISHING.md` for the release
+procedure.

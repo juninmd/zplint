@@ -1,15 +1,22 @@
 [package]
 name = "zpc-codegen"
-version = "0.1.0"
-edition = "2024"
 description = "AST to Pawn assembly code generation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-zpc-diag = { path = "../zpc-diag" }
-zpc-asm = { path = "../zpc-asm" }
-zpc-ast = { path = "../zpc-ast" }
-zpc-sema = { path = "../zpc-sema" }
+zpc-diag.workspace = true
+zpc-asm.workspace = true
+zpc-ast.workspace = true
+zpc-sema.workspace = true
 
 [dev-dependencies]
-zpc-lex = { path = "../zpc-lex" }
-zpc-parse = { path = "../zpc-parse" }
+zpc-lex.workspace = true
+zpc-parse.workspace = true

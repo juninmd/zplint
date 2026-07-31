@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "zpc"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "zpc-amxx",
  "zpc-asm",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "zpc-amxx"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "zpc-diag",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "zpc-asm"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "zpc-amxx",
  "zpc-diag",
@@ -692,14 +692,14 @@ dependencies = [
 
 [[package]]
 name = "zpc-ast"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "zpc-diag",
 ]
 
 [[package]]
 name = "zpc-codegen"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "zpc-asm",
  "zpc-ast",
@@ -711,18 +711,18 @@ dependencies = [
 
 [[package]]
 name = "zpc-diag"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "zpc-lex"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "zpc-diag",
 ]
 
 [[package]]
 name = "zpc-parse"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "zpc-ast",
  "zpc-diag",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "zpc-sema"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "zpc-ast",
  "zpc-diag",

@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # No `cargo fmt --check` gate: the tree predates rustfmt and enabling it would
+      # rewrite most files. Run `cargo fmt --all` in a dedicated commit to opt in,
+      # then add the check back here.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  msrv:
+    name: MSRV 1.87
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
+  package:
+    name: cargo package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Catches metadata/packaging regressions (missing license, bad exclude, path
+      # dep without a version) on every PR. --no-verify skips recompiling all ten
+      # tarballs, which the clippy and test jobs already cover. The full check,
+      # `cargo publish --workspace --dry-run`, is part of the release gate in
+      # docs/PUBLISHING.md.
+      - run: cargo package --workspace --no-verify
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

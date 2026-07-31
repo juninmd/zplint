@@ -1,12 +1,42 @@
 [workspace]
 members = ["crates/*"]
 
-[package]
-name = "zplint"
+[workspace.package]
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.87"
+authors = ["Antonio Carlos <juninho140695@gmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/juninmd/zplint"
+homepage = "https://github.com/juninmd/zplint"
+keywords = ["pawn", "amxx", "linter", "compiler", "cs16"]
+categories = ["development-tools", "compilers"]
+
+[workspace.dependencies]
+zpc-amxx = { version = "0.3.0", path = "crates/zpc-amxx" }
+zpc-asm = { version = "0.3.0", path = "crates/zpc-asm" }
+zpc-ast = { version = "0.3.0", path = "crates/zpc-ast" }
+zpc-codegen = { version = "0.3.0", path = "crates/zpc-codegen" }
+zpc-diag = { version = "0.3.0", path = "crates/zpc-diag" }
+zpc-lex = { version = "0.3.0", path = "crates/zpc-lex" }
+zpc-parse = { version = "0.3.0", path = "crates/zpc-parse" }
+zpc-sema = { version = "0.3.0", path = "crates/zpc-sema" }
+
+[package]
+name = "zplint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Lightning-fast linter for Pawn/AMXX (CS 1.6) plugins with Zombie Plague 5.0 support"
-authors = ["zplague-addons"]
+documentation = "https://docs.rs/zplint"
+readme = "README.md"
+exclude = ["/.github", "/scripts", "/AGENTS.md"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -18,13 +48,13 @@ walkdir = "2"
 notify = { version = "8", features = ["macos_kqueue"] }
 anyhow = "1"
 rayon = "1"
-zpc-amxx = { path = "crates/zpc-amxx" }
-zpc-asm = { path = "crates/zpc-asm" }
-zpc-ast = { path = "crates/zpc-ast" }
-zpc-lex = { path = "crates/zpc-lex" }
-zpc-parse = { path = "crates/zpc-parse" }
-zpc-codegen = { path = "crates/zpc-codegen" }
-zpc-diag = { path = "crates/zpc-diag" }
+zpc-amxx.workspace = true
+zpc-asm.workspace = true
+zpc-ast.workspace = true
+zpc-lex.workspace = true
+zpc-parse.workspace = true
+zpc-codegen.workspace = true
+zpc-diag.workspace = true
 
 [profile.release]
 opt-level = 3
