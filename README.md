@@ -3,7 +3,7 @@
 [![CI](https://github.com/juninmd/zplint/actions/workflows/ci.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/zplint.svg)](https://crates.io/crates/zplint)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/rustc-1.87%2B-orange.svg)](#install)
+[![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#install)
 
 Lightning-fast linter for **Pawn / AMX Mod X** plugins (CS 1.6), with deep **Zombie Plague 5.0** support.  
 Scans `.sma` files for **106 detectors**: compile errors before you compile, runtime-crash patterns
@@ -21,7 +21,7 @@ Validated against two corpora: the official `alliedmodders/amxmodx` bundled plug
 
 ## Install
 
-Requires Rust **1.87+** (edition 2024).
+Requires Rust **1.88+** (edition 2024).
 
 From crates.io:
 

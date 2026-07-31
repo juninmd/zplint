@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All `zpc-*` crates and the `zpc` driver move from `0.1.0` to `0.3.0`, matching the `zplint`
   binary. The workspace now ships as a single release train.
 - Inter-crate path dependencies now carry `version = "0.3.0"`, which crates.io requires.
-- Declared MSRV is **1.87** (was undeclared). `zpc-asm` uses `usize::is_multiple_of`, stable
-  since 1.87.
+- Declared MSRV is **1.88** (was undeclared). `zpc-lex` uses let-chains, stable since 1.88;
+  `zpc-asm` uses `usize::is_multiple_of`, stable since 1.87.
 - README: install section points at the real repository and `cargo install zplint`; the
   License section now states Apache-2.0 (it previously claimed MIT, with no `LICENSE` file
   present).

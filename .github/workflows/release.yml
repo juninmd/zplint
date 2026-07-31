@@ -33,7 +33,7 @@ jobs:
             target: aarch64-apple-darwin
             archive: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable

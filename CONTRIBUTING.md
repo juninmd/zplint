@@ -17,7 +17,7 @@ the exact upstream file.
 
 ## Development
 
-Requires Rust **1.87+** (edition 2024).
+Requires Rust **1.88+** (edition 2024).
 
 ```powershell
 cargo build --workspace

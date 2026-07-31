@@ -4,7 +4,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 authors = ["Antonio Carlos <juninho140695@gmail.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/juninmd/zplint"
