@@ -305,6 +305,34 @@ static RE_PRECACHE_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bpreca
 static RE_DIV_RUNTIME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[/%]\s*(get_playersnum|get_maxplayers|get_pcvar_num|get_pcvar_float)\s*\(").unwrap()
 });
+// ExecuteHamB(Ham_TakeDamage|Ham_Killed, victim, inflictor, attacker, ...):
+// captures inflictor (1) and attacker (2) when both are plain identifiers.
+static RE_HAM_DAMAGE_ARGS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"ExecuteHamB\s*\(\s*Ham_(?:TakeDamage|Killed)\s*,\s*[^,]+,\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*[,)]").unwrap()
+});
+// Identifiers that clearly name an entity, not a player slot.
+static RE_ENTITY_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(ent\d*|entity|g_?boss\w*|boss\w*|shard|rocket|projectile|bolt|mine|turret|puddle|pool|wall|spit|orb|trap|ball|nade|grenade|beam|pet|minion)$").unwrap()
+});
+// Player-slot identifiers: never flagged as "entity used as attacker".
+static RE_PLAYER_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(id|attacker|owner|killer|player|pid|idx|user|victim|target|iPlayer|plr)$").unwrap()
+});
+static RE_REMOVE_ENT_CURSOR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:fm_)?remove_entity\s*\(\s*([A-Za-z_]\w*)\s*\)|EngFunc_RemoveEntity\s*,\s*([A-Za-z_]\w*)\s*\)").unwrap()
+});
+static RE_ENT_ITERATOR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:find_ent_by_class|find_ent_in_sphere|EngFunc_FindEntityByString|EngFunc_FindEntityInSphere)").unwrap()
+});
+static RE_SPHERE_ITERATOR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:find_ent_in_sphere|EngFunc_FindEntityInSphere)").unwrap()
+});
+static RE_HAM_DAMAGE_CALL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"ExecuteHamB\s*\(\s*Ham_(?:TakeDamage|Killed)\b").unwrap()
+});
+static RE_ENGINE_CALLBACK_FN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(think|touch|takedamage|killed|prethink|postthink)").unwrap()
+});
 static RE_PRAGMA_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#pragma\s+dynamic").unwrap());
 static RE_GLOBAL_NEW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^new\s+(.+)$").unwrap());
 static RE_DECL_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|,)\s*(?:const\s+)?(?:\w+:)?([A-Za-z_]\w*)").unwrap());
@@ -884,6 +912,45 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             if config.enabled("precache_in_loop") && RE_PRECACHE_CALL.is_match(san) {
                 issues.push(iss(lineno, "precache_* inside a loop risks the 512-entry engine precache limit (fatal Host_Error at map start)".into(), "precache_in_loop", false));
             }
+            // The engine iterators (find_ent_by_class, FindEntityByString, ...) use the
+            // handle itself as the cursor for the next search. Freeing it inside the loop
+            // hands a dead edict back to the engine on the next turn -> crash in the game
+            // DLL. FL_KILLME defers the removal to the end of the frame.
+            if config.enabled("remove_in_ent_loop") && let Some(caps) = RE_REMOVE_ENT_CURSOR.captures(san) {
+                let var = caps.get(1).or_else(|| caps.get(2)).map(|m| m.as_str()).unwrap_or("");
+                let header = lines[i.saturating_sub(20)..i].iter().rev()
+                    .find(|l| RE_ENT_ITERATOR.is_match(l) && l.contains('='));
+                if !var.is_empty() && header.is_some_and(|h| h.contains(var)) {
+                    issues.push(iss(lineno, format!("remove_entity({}) frees the cursor of the enclosing entity iterator - the next turn hands a dead edict back to the engine (game DLL crash); mark FL_KILLME instead", var), "remove_in_ent_loop", false));
+                }
+            }
+            // Killing a player inside a sphere iteration can end the round, which makes
+            // other plugins delete entities - the iterator then walks freed memory.
+            if config.enabled("damage_in_sphere_loop") && RE_HAM_DAMAGE_CALL.is_match(san)
+                && lines[i.saturating_sub(20)..i].iter().rev().any(|l| RE_SPHERE_ITERATOR.is_match(l) && l.contains('=')) {
+                issues.push(iss(lineno, "damage applied inside a FindEntityInSphere iteration - a lethal hit can end the round and delete entities, leaving the engine cursor on freed memory; collect the targets first, apply damage after the loop".into(), "damage_in_sphere_loop", false));
+            }
+        }
+
+        // The game DLL casts `attacker` to CBasePlayer on the death path. Passing an
+        // entity index there makes it read player fields out of non-player memory
+        // (segfault inside cs.so). The entity belongs in the inflictor slot.
+        if config.enabled("ham_attacker_entity") && let Some(caps) = RE_HAM_DAMAGE_ARGS.captures(san) {
+            let inflictor = caps.get(1).unwrap().as_str();
+            let attacker = caps.get(2).unwrap().as_str();
+            let looks_like_entity = RE_ENTITY_NAME.is_match(attacker)
+                || (attacker == inflictor && !RE_PLAYER_NAME.is_match(attacker));
+            if looks_like_entity && !RE_PLAYER_NAME.is_match(attacker) {
+                issues.push(iss(lineno, format!("'{}' is an entity but is passed as the attacker of Ham_TakeDamage/Ham_Killed - the game DLL casts the attacker to CBasePlayer and reads player fields out of non-player memory (crash in cs.so); pass the owning player or 0 (world) and keep the entity as inflictor", attacker), "ham_attacker_entity", false));
+            }
+        }
+
+        // Removing an entity from inside its own engine callback frees an edict the
+        // engine still dereferences after the callback returns.
+        if config.enabled("remove_entity_in_callback") && RE_REMOVE_ENT_CURSOR.is_match(san)
+            && let Some(f) = enclosing_function_name(lines, i, &function_names)
+            && RE_ENGINE_CALLBACK_FN.is_match(&f) {
+            issues.push(iss(lineno, format!("remove_entity inside the engine callback '{}' frees an edict the engine still dereferences after the callback returns - mark FL_KILLME and let the engine remove it at the end of the frame", f), "remove_entity_in_callback", false));
         }
 
         if config.enabled("get_cvar_hotpath") && let Some(m) = RE_GET_CVAR.find(san)
@@ -1802,5 +1869,36 @@ mod tests {
         let ok3 = lint_str("rmtouch",
             "public plugin_init() {\n\tRegisterHam(Ham_Touch, \"info_target\", \"fw_Tch\");\n}\npublic fw_Tch(ent, other) {\n\tremove_entity(ent);\n}\n");
         assert!(!ok3.contains(&"remove_entity_in_damage_hook"));
+    }
+    #[test]
+    fn ham_attacker_entity_flagged() {
+        let r = lint_str("hamatk1", "public fw_Boom(ent) {\n\tnew target = 1;\n\tExecuteHamB(Ham_TakeDamage, target, ent, ent, 50.0, DMG_BLAST);\n}\n");
+        assert!(r.contains(&"ham_attacker_entity"));
+        let ok = lint_str("hamatk2", "public fw_Boom(ent, owner) {\n\tnew target = 1;\n\tExecuteHamB(Ham_TakeDamage, target, ent, owner, 50.0, DMG_BLAST);\n}\n");
+        assert!(!ok.contains(&"ham_attacker_entity"));
+    }
+
+    #[test]
+    fn remove_entity_in_callback_flagged() {
+        let r = lint_str("rmcb1", "public fw_RocketThink(ent) {\n\tremove_entity(ent);\n}\n");
+        assert!(r.contains(&"remove_entity_in_callback"));
+        let ok = lint_str("rmcb2", "public fw_RocketThink(ent) {\n\tset_pev(ent, pev_flags, pev(ent, pev_flags) | FL_KILLME);\n}\n");
+        assert!(!ok.contains(&"remove_entity_in_callback"));
+    }
+
+    #[test]
+    fn remove_in_ent_loop_flagged() {
+        let r = lint_str("rmloop1", "public cleanup() {\n\tnew ent = -1;\n\twhile ((ent = find_ent_by_class(ent, \"my_class\"))) {\n\t\tremove_entity(ent);\n\t}\n}\n");
+        assert!(r.contains(&"remove_in_ent_loop"));
+        let ok = lint_str("rmloop2", "public cleanup() {\n\tnew ent = -1;\n\twhile ((ent = find_ent_by_class(ent, \"my_class\"))) {\n\t\tset_pev(ent, pev_flags, pev(ent, pev_flags) | FL_KILLME);\n\t}\n}\n");
+        assert!(!ok.contains(&"remove_in_ent_loop"));
+    }
+
+    #[test]
+    fn damage_in_sphere_loop_flagged() {
+        let r = lint_str("sphere1", "public blast(ent, origin[3]) {\n\tnew id = -1;\n\twhile ((id = find_ent_in_sphere(id, origin, 100.0))) {\n\t\tExecuteHamB(Ham_TakeDamage, id, ent, 0, 10.0, DMG_BLAST);\n\t}\n}\n");
+        assert!(r.contains(&"damage_in_sphere_loop"));
+        let ok = lint_str("sphere2", "public blast(ent, origin[3]) {\n\tnew id = -1;\n\twhile ((id = find_ent_in_sphere(id, origin, 100.0))) {\n\t\tzp_colored_print(id, \"boom\");\n\t}\n}\n");
+        assert!(!ok.contains(&"damage_in_sphere_loop"));
     }
 }
