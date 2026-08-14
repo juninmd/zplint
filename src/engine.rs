@@ -1663,6 +1663,35 @@ public Task_Explode(ent) {
     }
 
     #[test]
+    fn test_task_entity_guarded_by_local_helper_is_ok() {
+        // Plugins routinely wrap the check in a local stock; a caller of one of those is as
+        // guarded as a caller of pev_valid itself.
+        let path = write_temp_sma("task_ent_helper", r#"public throw_acid(id) {
+    new ent = create_entity("info_target")
+    set_task(0.5, "Task_Acid", ent)
+}
+
+public Task_Acid(ent) {
+    if (!Valid(ent))
+    {
+        return
+    }
+    set_pev(ent, pev_nextthink, get_gametime() + 0.5)
+}
+
+bool:Valid(ent) {
+    if (ent < 1 || !pev_valid(ent))
+        return false
+    return true
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "task_entity_not_validated"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn test_task_entity_with_pev_valid_is_ok() {
         let path = write_temp_sma("task_ent_ok", r#"public throw_nade(id) {
     new ent = create_entity("info_target")

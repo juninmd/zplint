@@ -677,7 +677,9 @@ touches entity fields (`pev`, `set_pev`, `entity_get_*`, `ExecuteHam*`) without 
 `pev_valid`/`is_valid_ent` check hits "[FAKEMETA] Invalid entity" (run time error 10).
 Player-keyed tasks are out of scope here — §3.3/§6.1 cover the player-validity side.
 0 hits on both corpora: every entity task in the corpus already guards with `pev_valid`, which
-is precisely the idiom the rule asks for.
+is precisely the idiom the rule asks for. The guard is resolved one level deep — plugins wrap
+it in a local helper (`bool:Valid(ent) { return ent > 0 && pev_valid(ent) }`) and a caller of
+such a helper counts as guarded, otherwise the rule fires on correct code.
 
 ---
 

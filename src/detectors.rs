@@ -113,6 +113,35 @@ pub(crate) fn sizeof_len_sites(line: &str) -> Vec<(&'static str, String, String)
     out
 }
 
+/// Names of functions in this file whose own body validates an entity. Plugins routinely wrap
+/// the check in a local helper (`bool:Valid(ent) { return ent > 0 && pev_valid(ent) }`), and a
+/// caller of one of those is just as guarded as a caller of `pev_valid` itself.
+fn validator_functions(sanitized: &[(String, bool)]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut depth = 0i32;
+    let mut current: Option<String> = None;
+    for (i, (san, _)) in sanitized.iter().enumerate() {
+        let before = depth;
+        depth += san.matches('{').count() as i32 - san.matches('}').count() as i32;
+        if before == 0 && depth > 0 {
+            let header = if RE_FUNC_HEADER.is_match(san) { Some(san.as_str()) } else {
+                sanitized[..i].iter().rev().map(|(s, _)| s.as_str()).find(|s| !s.trim().is_empty())
+            };
+            current = header
+                .filter(|h| !RE_STMT_KEYWORD.is_match(h))
+                .and_then(|h| RE_FUNC_HEADER.captures(h))
+                .map(|c| c.get(1).unwrap().as_str().to_string());
+            continue;
+        }
+        if before >= 1 && let Some(name) = &current && RE_ENTITY_VALIDITY_GUARD.is_match(san) {
+            out.insert(name.clone());
+            current = None;
+        }
+        if before > 0 && depth == 0 { current = None; }
+    }
+    out
+}
+
 /// True if EVERY exit of `body` is `return <value>` at the function's own brace level - i.e.
 /// the caller gets `value` on every call. `body` starts at the function header, so its own
 /// statements sit at depth 1. Any nested return (an `if (...) return PLUGIN_CONTINUE` guard,
@@ -1619,6 +1648,7 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
     // its fields then raises "[FAKEMETA] Invalid entity" (run time error 10). Player-keyed
     // tasks are out of scope here (other rules cover the player-validity side).
     if config.enabled("task_entity_not_validated") {
+        let validators = validator_functions(&sanitized);
         for caps in RE_SET_TASK_CB.captures_iter(raw_clean) {
             let cb = caps.get(1).unwrap().as_str();
             let taskid = caps.get(2).unwrap().as_str();
@@ -1626,6 +1656,9 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             let body = find_function_body_in(lines, cb);
             if body.is_empty() { continue; }
             if !RE_ENTITY_FIELD_ACCESS.is_match(&body) || RE_ENTITY_VALIDITY_GUARD.is_match(&body) { continue; }
+            // guarded through a local wrapper (`if (!Valid(ent)) return`)
+            if validators.iter().any(|v| Regex::new(&format!(r"\b{}\s*\(", regex::escape(v)))
+                .is_ok_and(|re| re.is_match(&body))) { continue; }
             let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
             issues.push(iss(lineno, format!("the task callback \"{}\" reads/writes entity fields but never checks pev_valid() - '{}' can be freed before the task fires (remove_entity, round restart, another plugin), and the delayed call then hits \"[FAKEMETA] Invalid entity\" (run time error 10)", cb, taskid), "task_entity_not_validated", false));
         }

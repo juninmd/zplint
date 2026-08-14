@@ -37,10 +37,10 @@ pub struct RulesConfig {
     #[serde(default = "true_val")] pub zp_items_register_check: bool,
     // New rules
     #[serde(default = "true_val")] pub attacker_not_validated: bool,
-    #[serde(default = "true_val")] pub ham_attacker_entity: bool,
-    #[serde(default = "true_val")] pub remove_entity_in_callback: bool,
-    #[serde(default = "true_val")] pub remove_in_ent_loop: bool,
-    #[serde(default = "true_val")] pub damage_in_sphere_loop: bool,
+    // ham_attacker_entity, remove_entity_in_callback, remove_in_ent_loop and
+    // damage_in_sphere_loop have no field here on purpose: like every rule added since, they
+    // are toggled through `disable` below. A per-rule field that nothing reads would promise
+    // a switch that does nothing (serde ignores unknown keys, so old configs still load).
     #[serde(default = "true_val")] pub get_user_origin: bool,
     #[serde(default = "true_val")] pub task_interval_zero: bool,
     #[serde(default = "true_val")] pub set_task_flags: bool,
@@ -104,8 +104,6 @@ impl Default for RulesConfig {
             create_entity_guard: true, buffer_size: true,
             client_cmd_spk: true, zp_items_register_check: true,
             attacker_not_validated: true, get_user_origin: true,
-            ham_attacker_entity: true, remove_entity_in_callback: true,
-            remove_in_ent_loop: true, damage_in_sphere_loop: true,
             task_interval_zero: true, set_task_flags: true, abort_call: true,
             nested_message: true, message_write_outside: true,
             message_end_without_begin: true, message_hook_scope: true,
