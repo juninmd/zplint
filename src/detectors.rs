@@ -424,8 +424,12 @@ static RE_SPHERE_ITERATOR: LazyLock<Regex> = LazyLock::new(|| {
 static RE_HAM_DAMAGE_CALL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"ExecuteHamB\s*\(\s*Ham_(?:TakeDamage|Killed)\b").unwrap()
 });
+// "spawn" e "blocked"/"traceattack"/"keyvalue" faltavam aqui: os tres plugins que
+// derrubaram o server (zp50_objective_remover, zp50_buy_zones, zp50_gameplay_fixes)
+// liberavam a edict dentro de um FM_Spawn chamado "fw_Spawn", e a regra
+// remove_entity_in_callback nao disparava porque o nome nao casava.
 static RE_ENGINE_CALLBACK_FN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(think|touch|takedamage|killed|prethink|postthink)").unwrap()
+    Regex::new(r"(?i)(think|touch|takedamage|killed|prethink|postthink|spawn|blocked|traceattack|keyvalue|addtofullpack)").unwrap()
 });
 static RE_PRAGMA_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#pragma\s+dynamic").unwrap());
 static RE_GLOBAL_NEW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^new\s+(.+)$").unwrap());
@@ -2360,6 +2364,17 @@ mod tests {
         let r = lint_str("rmcb1", "public fw_RocketThink(ent) {\n\tremove_entity(ent);\n}\n");
         assert!(r.contains(&"remove_entity_in_callback"));
         let ok = lint_str("rmcb2", "public fw_RocketThink(ent) {\n\tset_pev(ent, pev_flags, pev(ent, pev_flags) | FL_KILLME);\n}\n");
+        assert!(!ok.contains(&"remove_entity_in_callback"));
+    }
+
+    // Caso real: zp50_objective_remover / zp50_buy_zones / zp50_gameplay_fixes
+    // liberavam a edict dentro do FM_Spawn dela via engfunc(EngFunc_RemoveEntity),
+    // e o server caia em engine_i486.so!SV_movestep.
+    #[test]
+    fn remove_entity_in_spawn_callback_flagged() {
+        let r = lint_str("rmspawn1", "public fw_Spawn(entity) {\n\tengfunc(EngFunc_RemoveEntity, entity);\n}\n");
+        assert!(r.contains(&"remove_entity_in_callback"));
+        let ok = lint_str("rmspawn2", "public fw_Spawn(entity) {\n\tset_pev(entity, pev_flags, pev(entity, pev_flags) | FL_KILLME);\n}\n");
         assert!(!ok.contains(&"remove_entity_in_callback"));
     }
 
