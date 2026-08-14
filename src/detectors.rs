@@ -71,6 +71,71 @@ static ENGFUNC_PARAM_TYPES: &[(&str, &[Option<EfType>])] = &[
 static RE_INT_LITERAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?\d+$").unwrap());
 static RE_FLOAT_LITERAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-?\d+\.\d+$").unwrap());
 
+/// Natives whose length parameter is a MAX-CHARS count, as `(native, buffer arg, length arg)`
+/// zero-based argument indices. string.inc states the contract for all of them: "all string
+/// functions which take in a writable buffer and maximum length should NOT have the null
+/// terminator INCLUDED in the length. This means that this is valid: copy(string,
+/// charsmax(string), ...)". amxmodx/string.cpp's `set_amxstring` confirms it writes max+1
+/// cells (`while (max-- && *source) *dest++ = ...; *dest = 0;`).
+/// Cell-count natives (ArrayGetArray, get_array, ArraySetArray, ...) are deliberately ABSENT:
+/// their size parameter counts cells, so `sizeof` is the correct form there.
+static CHARS_LEN_NATIVES: &[(&str, usize, usize)] = &[
+    ("get_user_name", 1, 2), ("get_user_authid", 1, 2), ("get_user_ip", 1, 2),
+    ("get_user_team", 1, 2), ("get_user_info", 2, 3), ("get_weaponname", 1, 2),
+    ("cs_get_user_model", 1, 2),
+    ("copy", 0, 1), ("copyc", 0, 1), ("strcat", 0, 2), ("replace", 0, 1),
+    ("format", 0, 1), ("formatex", 0, 1), ("vformat", 0, 1), ("num_to_str", 1, 2),
+    ("get_cvar_string", 1, 2), ("get_pcvar_string", 1, 2), ("get_localinfo", 1, 2),
+    ("read_argv", 1, 2), ("read_args", 0, 1), ("get_msg_arg_string", 1, 2),
+    ("ArrayGetString", 2, 3), ("TrieGetString", 2, 3),
+    ("get_mapname", 0, 1), ("get_configsdir", 0, 1), ("get_time", 1, 2), ("fgets", 1, 2),
+];
+
+/// Every `sizeof` used as the max-chars length of the very buffer it measures, as
+/// `(native, buffer name, verbatim sizeof argument)`. Shared with `fix.rs`, which rewrites
+/// the sizeof to charsmax.
+pub(crate) fn sizeof_len_sites(line: &str) -> Vec<(&'static str, String, String)> {
+    let mut out = Vec::new();
+    for &(native, buf_idx, len_idx) in CHARS_LEN_NATIVES {
+        for args in extract_call_args(line, native) {
+            let (Some(buf), Some(len)) = (args.get(buf_idx), args.get(len_idx)) else { continue };
+            let buf = buf.trim();
+            let len = len.trim();
+            if !RE_IDENT_ONLY.is_match(buf) { continue; }
+            // `sizeof buf` / `sizeof(buf)` measuring the buffer of THIS call - a different
+            // array's sizeof (a row count, an unrelated table) is not a length bug.
+            let Some(rest) = len.strip_prefix("sizeof") else { continue };
+            let measured = rest.trim().trim_start_matches('(').trim_end_matches(')').trim();
+            if measured != buf { continue; }
+            out.push((native, buf.to_string(), len.to_string()));
+        }
+    }
+    out
+}
+
+/// True if EVERY exit of `body` is `return <value>` at the function's own brace level - i.e.
+/// the caller gets `value` on every call. `body` starts at the function header, so its own
+/// statements sit at depth 1. Any nested return (an `if (...) return PLUGIN_CONTINUE` guard,
+/// the shape official plugins like adminchat.sma use), any braceless guard on the same line,
+/// and any other top-level return value all make it conditional.
+fn returns_unconditionally(body: &str, value: &str) -> bool {
+    let mut depth = 0i32;
+    let mut unconditional = false;
+    for line in body.lines() {
+        let before = depth;
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        let t = line.trim();
+        if !t.contains("return") { continue; }
+        if before > 1 { return false; }
+        if t.starts_with("if") || t.starts_with("else") || t.starts_with("case")
+            || t.starts_with("default") || t.contains('?') { return false; }
+        if before == 1 {
+            if t.contains(&format!("return {}", value)) { unconditional = true; } else { return false; }
+        }
+    }
+    unconditional
+}
+
 /// Check every engfunc() call on `line` against ENGFUNC_PARAM_TYPES; returns
 /// (rule_id, message) for each positional literal/type mismatch found.
 fn engfunc_param_mismatches(line: &str) -> Vec<(&'static str, String)> {
@@ -417,6 +482,80 @@ static RE_REGISTERHAM_ANY: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_SET_HAM_PARAM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bSetHamParam(Integer|Float)\s*\(\s*(\d+)\s*,").unwrap()
+});
+// ExecuteHamB re-fires every registered hook of that Ham_ function (ExecuteHam does not).
+static RE_EXECUTE_HAM_B: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bExecuteHamB\s*\(\s*(Ham_\w+)").unwrap()
+});
+// register_message(<msgid expr>, "callback") - the id expression is kept verbatim so the
+// handler's own message_begin can be compared against it.
+static RE_REGISTER_MESSAGE_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\bregister_message\s*\(\s*([^,()]+(?:\([^()]*\))?[^,]*?)\s*,\s*"(\w+)"\s*\)"#).unwrap()
+});
+// message_begin(dest, <msgid expr>, ...) - `emessage_begin` is the safe form and is excluded.
+static RE_MESSAGE_BEGIN_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[^e_\w])message_begin\s*\(\s*[^,]+,\s*([^,)]+)").unwrap()
+});
+// Dynamic handles that the plugin owns and must free (cellarray/celltrie/datapack docs:
+// "plugins are responsible for freeing all handles they acquire").
+static RE_HANDLE_NEW: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bnew\s+(?:\w+:)?([A-Za-z_]\w*)\s*=\s*(ArrayCreate|ArrayClone|TrieCreate|TrieSnapshotCreate|CreateDataPack)\s*\(").unwrap()
+});
+// random_num()'s upper bound is INCLUSIVE, so a bare sizeof/ArraySize overruns by one.
+static RE_RANDOM_NUM_BOUND: LazyLock<Regex> = LazyLock::new(|| {
+    // The bound must be the WHOLE second argument - `sizeof x - 1` is the correct form and
+    // must not match, so the alternatives are closed and immediately followed by random_num's `)`.
+    Regex::new(r"\brandom_num\s*\(\s*[^,]+,\s*(sizeof\s*\(\s*[A-Za-z_]\w*\s*\)|sizeof\s+[A-Za-z_]\w*|ArraySize\s*\(\s*[A-Za-z_]\w*\s*\))\s*\)").unwrap()
+});
+// A whole function definition line: optional storage class, optional return tag, name,
+// parameter list, and nothing but an opening brace after it. Keyword-led lines (`if (...)`,
+// `while (...)`) are excluded by the caller.
+static RE_FUNC_HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(?:(?:public|stock|static|forward)\s+)*(?:[A-Za-z_]\w*:)?([A-Za-z_]\w*)\s*\([^;()]*\)\s*\{?\s*$").unwrap()
+});
+static RE_STMT_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(?:if|while|for|switch|return|case|default|else|do|new|native)\b").unwrap()
+});
+// Message arguments are 1-based: amxmodx/messages.cpp guards every accessor with
+// `if (index < 1 || index > m_CurParam)` and raises "Invalid message argument %d".
+static RE_MSG_ARG_INDEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b((?:get|set)_msg_arg_\w+)\s*\(\s*(-?\d+)\s*[,)]").unwrap()
+});
+// Network field widths of the HL message protocol - a wider literal is silently truncated
+// on the wire (write_byte(300) arrives as 44).
+static RE_WRITE_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:e?write_(byte|char|short))\s*\(\s*(-?\d+)\s*\)").unwrap()
+});
+// set_task(<time>, "<callback>", <taskid>) - the task id is what the callback receives.
+static RE_SET_TASK_CB: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\bset_task(?:_ex)?\s*\(\s*[^,]+,\s*"(\w+)"\s*,\s*([A-Za-z_]\w*)"#).unwrap()
+});
+static RE_ENTITY_FIELD_ACCESS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:set_pev|pev|entity_get_\w+|entity_set_\w+|ExecuteHamB?)\s*\(").unwrap()
+});
+static RE_ENTITY_VALIDITY_GUARD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:pev_valid|is_valid_ent|valid_ent|is_nullent)\s*\(").unwrap()
+});
+static RE_SAY_CLCMD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\bregister_clcmd\s*\(\s*"say(?:_team)?"\s*,\s*"(\w+)""#).unwrap()
+});
+static RE_CS_SET_MODEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bcs_set_user_model\s*\(").unwrap());
+// Handle-freeing natives: after these the variable is dead (ArrayDestroy/TrieDestroy even
+// zero it by reference "to aid in preventing accidental usage after destroy").
+static RE_HANDLE_DESTROY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(ArrayDestroy|TrieDestroy|TrieSnapshotDestroy|DestroyDataPack|menu_destroy|fclose)\s*\(\s*([A-Za-z_]\w*)\s*\)").unwrap()
+});
+// A repeating task ("b" flag) keyed by a player index must be cancelled when that player
+// leaves, or it keeps firing on an empty slot.
+static RE_TASK_ID_PLAYER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(id|player|victim|attacker|index|iPlayer|plr|user|client)\b").unwrap()
+});
+static RE_ALLOC_STRING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bEngFunc_AllocString\b").unwrap()
+});
+// Per-frame / per-touch engine callbacks: anything allocating from the map hunk here is fatal.
+static RE_PER_FRAME_FN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(prethink|postthink|playermove|_think|think$|touch|emitsound|startframe|addtofullpack)").unwrap()
 });
 
 /// Strip string/char literal contents and `//` comments. `esc` is the file's
@@ -926,8 +1065,13 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             }
             // Killing a player inside a sphere iteration can end the round, which makes
             // other plugins delete entities - the iterator then walks freed memory.
+            // Only the innermost enclosing loop counts: after the "collect first, apply
+            // after" rewrite the damage sits in a plain for() below the sphere while(),
+            // and that shape is exactly the fix - it must not be flagged.
             if config.enabled("damage_in_sphere_loop") && RE_HAM_DAMAGE_CALL.is_match(san)
-                && lines[i.saturating_sub(20)..i].iter().rev().any(|l| RE_SPHERE_ITERATOR.is_match(l) && l.contains('=')) {
+                && lines[i.saturating_sub(30)..i].iter().rev()
+                    .find(|l| RE_LOOP_HEADER.is_match(l))
+                    .is_some_and(|l| RE_SPHERE_ITERATOR.is_match(l) && l.contains('=')) {
                 issues.push(iss(lineno, "damage applied inside a FindEntityInSphere iteration - a lethal hit can end the round and delete entities, leaving the engine cursor on freed memory; collect the targets first, apply damage after the loop".into(), "damage_in_sphere_loop", false));
             }
         }
@@ -1060,6 +1204,127 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                     issues.push(iss(lineno, "client_connect is 'too early to do anything that directly affects the client' (official docs) - move to client_putinserver".into(), "client_connect_actions", false));
                     break;
                 }
+            }
+        }
+
+        // --- dynamic handle ownership ---
+        // cellarray/celltrie/datapack docs: "plugins are responsible for freeing all handles
+        // they acquire ... failing to free them results in the plugin and AMXX leaking memory".
+        // A handle created in a LOCAL (`new`) and never destroyed in the same function leaks on
+        // every call - globals are excluded, they are the legitimate plugin-lifetime pattern.
+        if config.enabled("handle_leak") && let Some(caps) = RE_HANDLE_NEW.captures(san) {
+            let var = caps.get(1).unwrap().as_str();
+            let create = caps.get(2).unwrap().as_str();
+            let destroy = match create {
+                "TrieCreate" => "TrieDestroy",
+                "TrieSnapshotCreate" => "TrieSnapshotDestroy",
+                "CreateDataPack" => "DestroyDataPack",
+                _ => "ArrayDestroy",
+            };
+            let body_sq = squash(&enclosing_body(lines, i));
+            // `return h` / `f(x, h)` hand the handle to the caller or to another container -
+            // ownership leaves this function and the destroy belongs elsewhere.
+            let escapes = body_sq.contains(&format!("return{}", var))
+                || body_sq.contains(&format!(",{})", var))
+                || body_sq.contains(&format!(",{},", var));
+            if !body_sq.contains(&format!("{}({})", destroy, var)) && !escapes {
+                issues.push(iss(lineno, format!("{}() handle '{}' is never freed with {}({}) in this function - the plugin leaks memory on every call", create, var, destroy, var), "handle_leak", false));
+            }
+        }
+
+        // Freeing a handle invalidates the variable (ArrayDestroy/TrieDestroy even zero it by
+        // reference "to aid in preventing accidental usage after destroy") - any later use in
+        // the same function hits handle 0 -> run time error 10 (native error).
+        if config.enabled("handle_use_after_destroy") && let Some(caps) = RE_HANDLE_DESTROY.captures(san) {
+            let var = caps.get(2).unwrap().as_str();
+            let re_use = Regex::new(&format!(r"[(,]\s*{}\s*[,)]", regex::escape(var))).unwrap();
+            let re_reassign = Regex::new(&format!(r"\b{}\s*=[^=]", regex::escape(var))).unwrap();
+            // Walk the rest of the enclosing function (depth returns to 0 at its closing brace).
+            // Only straight-line code counts: a use at a DIFFERENT brace depth, or after a
+            // case/default/else, is on another control-flow path (the ubiquitous safe idiom is
+            // `if (item == MENU_EXIT) menu_destroy(menu)` followed by the non-exit path).
+            for (j, (later, _)) in sanitized.iter().enumerate().skip(i + 1) {
+                if depth_before[j] == 0 { break; }
+                if depth_before[j] < depth_before[i] { break; }
+                let lt = later.trim_start().trim_start_matches(['}', ' ', '\t']);
+                if lt.starts_with("case") || lt.starts_with("default") || lt.starts_with("else") { break; }
+                // control left this path before the use (`menu_destroy(m); return`, then another
+                // branch that legitimately still owns its own handle)
+                if lt.starts_with("return") && depth_before[j] <= depth_before[i] { break; }
+                if re_reassign.is_match(later) { break; }
+                if depth_before[j] != depth_before[i] { continue; }
+                if re_use.is_match(later) {
+                    issues.push(iss(j + 1, format!("'{}' is used after {}({}) freed it on line {} - the handle is 0/dangling here (run time error 10: native error)", var, caps.get(1).unwrap().as_str(), var, lineno), "handle_use_after_destroy", false));
+                    break;
+                }
+            }
+        }
+
+        // A repeating task ("b") keyed by a player index outlives the player: after a disconnect
+        // it keeps firing on an empty slot (run time error 10 / actions on the next occupant).
+        if config.enabled("task_no_remove") && !raw_sq.contains("remove_task(") {
+            for args in extract_call_args(line, "set_task").into_iter().chain(extract_call_args(line, "set_task_ex")) {
+                let repeats = args.get(5).is_some_and(|f| f.contains('b') || f.contains("SetTask_Repeat"));
+                let Some(taskid) = args.get(2).map(|a| a.trim()) else { continue };
+                if repeats && RE_TASK_ID_PLAYER.is_match(taskid) {
+                    issues.push(iss(lineno, format!("repeating task keyed by player '{}' is never cancelled - this file has no remove_task() at all, so it keeps firing after the player disconnects (run time error 10 / acts on the next occupant of the slot)", taskid), "task_no_remove", false));
+                }
+            }
+        }
+
+        // random_num()'s upper bound is inclusive: random_num(0, sizeof arr) can return
+        // sizeof arr, one past the last valid index (run time error 4).
+        if config.enabled("random_num_bound") && let Some(caps) = RE_RANDOM_NUM_BOUND.captures(san) {
+            let bound = caps.get(1).unwrap().as_str().trim();
+            issues.push(iss(lineno, format!("random_num()'s upper bound is INCLUSIVE - '{}' can return one past the last index (run time error 4: index out of bounds); use {} - 1", bound, bound), "random_num_bound", false));
+        }
+
+        // Message arguments start at 1 (amxmodx/messages.cpp: `index < 1 || index > m_CurParam`
+        // -> "Invalid message argument"), so a literal 0 always throws.
+        if config.enabled("msg_arg_index") && let Some(caps) = RE_MSG_ARG_INDEX.captures(san) {
+            let idx: i64 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+            if idx < 1 {
+                issues.push(iss(lineno, format!("{}({}) - message arguments are 1-based; amxmodx rejects anything below 1 with \"Invalid message argument\" (run time error 10)", caps.get(1).unwrap().as_str(), idx), "msg_arg_index", false));
+            }
+        }
+
+        // The HL message protocol writes fixed-width fields; a wider literal is truncated on
+        // the wire, so the client receives a different number than the code says.
+        if config.enabled("write_literal_range") && let Some(caps) = RE_WRITE_LITERAL.captures(san) {
+            let kind = caps.get(1).unwrap().as_str();
+            let value: i64 = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
+            // -1..-128 stay legal for byte: they are the usual way of writing 0xFF-style flags.
+            let (lo, hi) = match kind { "byte" => (-128, 255), "char" => (-128, 127), _ => (-32768, 32767) };
+            if value < lo || value > hi {
+                issues.push(iss(lineno, format!("write_{}({}) does not fit the {}-field of the message protocol ({}..{}) - the value is truncated on the wire; use the next wider write_* instead", kind, value, kind, lo, hi), "write_literal_range", false));
+            }
+        }
+
+        // `sizeof buf` as a max-chars length is one cell too many: set_amxstring writes up to
+        // `max` characters AND a terminator, so the write runs one cell past the array.
+        if config.enabled("sizeof_string_len") {
+            for (native, buf, sizeof_text) in sizeof_len_sites(line) {
+                issues.push(iss(lineno, format!("{}() writes up to '{}' characters plus a terminator, so sizeof overruns {} by one cell - string.inc's contract is charsmax({})", native, sizeof_text, buf, buf), "sizeof_string_len", true));
+            }
+        }
+
+        // The cstrike module re-applies the model by itself; calling cs_set_user_model per frame
+        // is pure overhead, and the legacy userinfo-based model change historically got clients
+        // kicked with svc_bad.
+        if config.enabled("cs_model_hotpath") && RE_CS_SET_MODEL.is_match(san)
+            && (in_loop[i] || enclosing_function_name(lines, i, &function_names)
+                .is_some_and(|f| RE_PER_FRAME_FN.is_match(&f))) {
+            issues.push(iss(lineno, "cs_set_user_model() in a per-frame callback/loop - the cstrike module re-applies the model automatically, and per-frame userinfo model changes historically kicked clients with svc_bad; set it once on spawn/infect".into(), "cs_model_hotpath", false));
+        }
+
+        // EngFunc_AllocString allocates from the map hunk on every call (never reused, freed
+        // only on map change) - per-frame use exhausts it: "Hunk_Alloc: failed on N bytes".
+        if config.enabled("allocstring_hotpath") && RE_ALLOC_STRING.is_match(san) {
+            let hot = in_loop[i]
+                || enclosing_function_name(lines, i, &function_names)
+                    .is_some_and(|f| RE_PER_FRAME_FN.is_match(&f));
+            if hot {
+                issues.push(iss(lineno, "EngFunc_AllocString allocates from the map hunk on EVERY call (even for an identical string) and is only freed on map change - calling it per frame/per loop iteration ends in 'Hunk_Alloc: failed'; cache the handle in a static".into(), "allocstring_hotpath", false));
             }
         }
 
@@ -1245,6 +1510,167 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                 let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
                 issues.push(iss(lineno, format!("remove_entity() runs synchronously inside the Ham_TakeDamage callback \"{}\" - multi-pellet weapons (shotgun) free the edict mid-FireBullets and later pellets deref it -> server freeze; defer via set_task or set pev_flags FL_KILLME", cb), "remove_entity_in_damage_hook", false));
             }
+        }
+    }
+
+    // hamsandwich.inc on ExecuteHamB: "Be very careful about recursion" - it re-fires every
+    // registered hook of that function, including the one currently running. Calling it on the
+    // same Ham_ inside its own callback is an unbounded loop -> run time error 3 (stack error)
+    // and, on the damage path, a server crash. EnableHamForward/DisableHamForward around the
+    // call is the documented escape hatch, so a body that uses them is not flagged.
+    if config.enabled("ham_recursion") {
+        let hooks: Vec<(String, String)> = RE_REGISTERHAM_ANY.captures_iter(raw_clean)
+            .map(|c| (c.get(1).unwrap().as_str().to_string(), c.get(2).unwrap().as_str().to_string()))
+            .collect();
+        if !hooks.is_empty() {
+            for (i, (san, _)) in sanitized.iter().enumerate() {
+                let Some(caps) = RE_EXECUTE_HAM_B.captures(san) else { continue };
+                let ham = caps.get(1).unwrap().as_str();
+                let Some(func) = enclosing_function_name(lines, i, &function_names) else { continue };
+                if !hooks.iter().any(|(h, cb)| h == ham && *cb == func) { continue; }
+                let body = enclosing_body(lines, i);
+                if body.contains("DisableHamForward") || body.contains("EnableHamForward") { continue; }
+                issues.push(iss(i + 1, format!("ExecuteHamB({}) inside \"{}\", which is itself the {} hook - it re-fires this same callback forever (run time error 3: stack error); use ExecuteHam() (no hooks), SetHamParam* to change arguments, or Disable/EnableHamForward around the call", ham, func, ham), "ham_recursion", false));
+            }
+        }
+    }
+
+    // Same re-entry class, different trigger: user_kill()/dllfunc(DLLFunc_ClientKill) inside a
+    // Ham_Killed hook. The kill runs the death path again, which fires Ham_Killed again.
+    if config.enabled("kill_in_killed_hook") {
+        for caps in RE_REGISTERHAM_ANY.captures_iter(raw_clean) {
+            if caps.get(1).unwrap().as_str() != "Ham_Killed" { continue; }
+            let cb = caps.get(2).unwrap().as_str();
+            let body = find_function_body_in(lines, cb);
+            if body.is_empty() { continue; }
+            let body_sq = squash(&body);
+            if body_sq.contains("user_kill(") || body_sq.contains("DLLFunc_ClientKill") {
+                let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+                issues.push(iss(lineno, format!("the Ham_Killed callback \"{}\" kills a player again (user_kill/DLLFunc_ClientKill) - the death path re-enters this same hook (run time error 3: stack error); set health/flags instead, or defer the kill with set_task", cb), "kill_in_killed_hook", false));
+            }
+        }
+    }
+
+    // amxxpc warning 234 ("recursive function") on an AMX with a 4096-cell stack: each level
+    // costs the frame plus every local, so a data-driven depth blows it (run time error 3).
+    if config.enabled("self_recursion") {
+        let mut depth = 0i32;
+        let mut current: Option<(String, usize)> = None;
+        for (i, (san, _)) in sanitized.iter().enumerate() {
+            let before = depth;
+            depth += san.matches('{').count() as i32 - san.matches('}').count() as i32;
+            if before == 0 && depth > 0 {
+                // the header is this line, or the last non-empty line above it (brace on its own)
+                let header = if RE_FUNC_HEADER.is_match(san) { Some(san.as_str()) } else {
+                    sanitized[..i].iter().rev().map(|(s, _)| s.as_str())
+                        .find(|s| !s.trim().is_empty())
+                };
+                current = header
+                    .filter(|h| !RE_STMT_KEYWORD.is_match(h))
+                    .and_then(|h| RE_FUNC_HEADER.captures(h))
+                    .map(|c| (c.get(1).unwrap().as_str().to_string(), i + 1));
+                continue;
+            }
+            if before >= 1 && let Some((name, _)) = &current
+                && Regex::new(&format!(r"\b{}\s*\(", regex::escape(name))).is_ok_and(|re| re.is_match(san)) {
+                issues.push(iss(i + 1, format!("\"{}\" calls itself (warning 234) - the AMX stack is 4096 cells and every level costs a frame plus its locals, so a data-driven depth ends in run time error 3 (stack error); rewrite as a loop", name), "self_recursion", false));
+                current = None;
+            }
+            if before > 0 && depth == 0 { current = None; }
+        }
+    }
+
+    // amxxpc warning 209: one exit returns a value and another returns nothing. The bare
+    // return yields 0 - PLUGIN_CONTINUE for a command/forward, and for a Ham or fakemeta hook
+    // a value outside the documented enum entirely (HAM_IGNORED and FMRES_IGNORED are both 1).
+    // Only leading `return` statements count; a braceless `if (...) return` guard is left to
+    // amxxpc itself, or every AMXX callback in existence would be flagged.
+    if config.enabled("mixed_return") {
+        let mut depth = 0i32;
+        let mut start: Option<usize> = None;
+        let (mut value_return, mut bare_return) = (None::<usize>, None::<usize>);
+        for (i, (san, _)) in sanitized.iter().enumerate() {
+            let before = depth;
+            depth += san.matches('{').count() as i32 - san.matches('}').count() as i32;
+            if before == 0 && depth > 0 {
+                start = Some(i);
+                value_return = None;
+                bare_return = None;
+            }
+            if start.is_some() && before >= 1 {
+                let t = san.trim();
+                if let Some(rest) = t.strip_prefix("return") {
+                    let rest = rest.trim_start_matches(|c: char| c.is_whitespace());
+                    if rest.is_empty() || rest.starts_with(';') { bare_return.get_or_insert(i + 1); }
+                    else { value_return.get_or_insert(i + 1); }
+                }
+            }
+            if before > 0 && depth == 0 {
+                if let (Some(vl), Some(bl)) = (value_return, bare_return) {
+                    issues.push(iss(bl, format!("this function returns a value on line {} but nothing here (warning 209) - the bare return hands the caller 0: PLUGIN_CONTINUE for a command/forward, and a value outside the enum for a Ham/fakemeta hook (HAM_IGNORED and FMRES_IGNORED are 1); return a value on every path", vl), "mixed_return", false));
+                }
+                start = None;
+            }
+        }
+    }
+
+    // A task keyed by an ENTITY fires later, by which point the entity may be long gone -
+    // remove_entity, a round restart or another plugin's cleanup all free the edict. Touching
+    // its fields then raises "[FAKEMETA] Invalid entity" (run time error 10). Player-keyed
+    // tasks are out of scope here (other rules cover the player-validity side).
+    if config.enabled("task_entity_not_validated") {
+        for caps in RE_SET_TASK_CB.captures_iter(raw_clean) {
+            let cb = caps.get(1).unwrap().as_str();
+            let taskid = caps.get(2).unwrap().as_str();
+            if !RE_ENTITY_NAME.is_match(taskid) { continue; }
+            let body = find_function_body_in(lines, cb);
+            if body.is_empty() { continue; }
+            if !RE_ENTITY_FIELD_ACCESS.is_match(&body) || RE_ENTITY_VALIDITY_GUARD.is_match(&body) { continue; }
+            let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+            issues.push(iss(lineno, format!("the task callback \"{}\" reads/writes entity fields but never checks pev_valid() - '{}' can be freed before the task fires (remove_entity, round restart, another plugin), and the delayed call then hits \"[FAKEMETA] Invalid entity\" (run time error 10)", cb, taskid), "task_entity_not_validated", false));
+        }
+    }
+
+    // amxconst.inc: PLUGIN_HANDLED in a say/say_team handler blocks the message for everyone,
+    // including the other plugins' say hooks. Unconditionally, it eats all server chat.
+    if config.enabled("say_hook_handled") {
+        for caps in RE_SAY_CLCMD.captures_iter(raw_clean) {
+            let cb = caps.get(1).unwrap().as_str();
+            let body = find_function_body_in(lines, cb);
+            if body.is_empty() || !returns_unconditionally(&body, "PLUGIN_HANDLED") { continue; }
+            let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+            issues.push(iss(lineno, format!("the say handler \"{}\" returns PLUGIN_HANDLED on every call - the message never reaches chat and no other plugin's say hook runs; return PLUGIN_CONTINUE unless this call really consumed the message", cb), "say_hook_handled", false));
+        }
+    }
+
+    // Same re-entry class on the message path: message_begin() from inside the handler of that
+    // very message id re-enters the hook. emessage_begin() exists precisely for this - it sends
+    // the message without re-triggering AMXX message hooks.
+    if config.enabled("message_recursion") {
+        let hooks: Vec<(String, String)> = RE_REGISTER_MESSAGE_ID.captures_iter(raw_clean)
+            .map(|c| (squash(c.get(1).unwrap().as_str()), c.get(2).unwrap().as_str().to_string()))
+            .collect();
+        if !hooks.is_empty() {
+            for (i, line) in lines.iter().enumerate() {
+                let Some(caps) = RE_MESSAGE_BEGIN_ID.captures(line) else { continue };
+                let msg = squash(caps.get(1).unwrap().as_str());
+                let Some(func) = enclosing_function_name(lines, i, &function_names) else { continue };
+                if !hooks.iter().any(|(m, cb)| *m == msg && *cb == func) { continue; }
+                issues.push(iss(i + 1, format!("message_begin({}) inside \"{}\", the registered handler for that same message - every send re-enters this hook (run time error 3: stack error / server crash); use emessage_begin(), which does not re-trigger message hooks", caps.get(1).unwrap().as_str().trim(), func), "message_recursion", false));
+            }
+        }
+    }
+
+    // zp50_core blocks the infection when zp_fw_core_infect_pre returns PLUGIN_HANDLED. Doing
+    // that on every call means the first zombie of the round can never be picked, and the mode
+    // never starts (the server sits in an endless "choosing zombie" loop).
+    if config.enabled("zp_infect_pre_handled") {
+        for name in ["zp_fw_core_infect_pre", "zp_fw_core_cure_pre"] {
+            let body = find_function_body_in(lines, name);
+            if body.is_empty() || !returns_unconditionally(&body, "PLUGIN_HANDLED") { continue; }
+            let lineno = raw_clean.find(&format!("public {}", name))
+                .map(|p| raw_clean[..p].matches('\n').count() + 1).unwrap_or(1);
+            issues.push(iss(lineno, format!("{} returns PLUGIN_HANDLED unconditionally - it blocks EVERY infection/cure, including the round's first zombie, so the game mode never starts; block only the cases you mean to", name), "zp_infect_pre_handled", false));
         }
     }
 

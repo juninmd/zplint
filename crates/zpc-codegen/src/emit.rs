@@ -63,10 +63,17 @@ pub struct Unit {
     /// The data segment, in cells.
     pub data: Vec<i32>,
     /// Native functions in the order their `sysreq.c` indices were handed out
-    /// (`ntv_funcid++` in `ffcall()`).
+    /// (`ntv_funcid++` in `ffcall()`). Only the ones actually called are here -
+    /// see [`prune_natives`].
     pub natives: Vec<String>,
     /// Public functions and the label of their `proc`.
     pub publics: Vec<(String, LabelId)>,
+    /// Public global variables and their byte address in the data segment
+    /// (`sc6.c:801`). The host binds these by name: AMX Mod X fills `MaxClients`,
+    /// `MapName` and the `NULL_STRING`/`NULL_VECTOR` sentinels through
+    /// `amx_FindPubVar` at load, so a plugin that reads them gets 0 when the entry
+    /// is missing - with no load error.
+    pub pubvars: Vec<(String, i32)>,
     pub diags: Diagnostics,
 }
 
@@ -121,6 +128,8 @@ pub struct Generator {
     /// Native names in the order their `sysreq.c` indices were handed out.
     pub(crate) natives: Vec<String>,
     pub(crate) publics: Vec<(String, LabelId)>,
+    /// Public global variables and their data-segment byte address.
+    pub(crate) pubvars: Vec<(String, i32)>,
     /// Every identifier named anywhere outside a `stock` body. A `stock` whose
     /// name never appears there is not emitted - see [`Generator::function`].
     pub(crate) referenced: std::collections::HashSet<String>,
@@ -151,6 +160,7 @@ impl Generator {
             goto_labels: HashMap::new(),
             natives: Vec::new(),
             publics: Vec::new(),
+            pubvars: Vec::new(),
             referenced: std::collections::HashSet::new(),
         };
         // `#pragma rational Float` in float.inc. Registering it up front is what
@@ -256,11 +266,15 @@ impl Generator {
             self.item(item);
         }
 
+        let mut code = self.asm.into_items();
+        let natives = prune_natives(&mut code, &self.natives);
+
         Unit {
-            code: self.asm.into_items(),
+            code,
             data: self.data.cells().to_vec(),
-            natives: self.natives,
+            natives,
             publics: self.publics,
+            pubvars: self.pubvars,
             diags: self.diags,
         }
     }
@@ -740,6 +754,12 @@ impl Generator {
                 )
                 .with_usage(Usage::DEFINED),
             );
+            // `declglb()` puts a `public` global in the pubvar table with its data
+            // address (sc1.c:1806, written by sc6.c:801). The `@` prefix already
+            // became `modifiers.public` in the parser.
+            if v.modifiers.public {
+                self.pubvars.push((d.name.name.clone(), addr));
+            }
             let mut info = VarInfo::global(addr, kind);
             info.is_const = v.modifiers.is_const;
             info.tag = self.tag_of(d.tag.as_ref());
@@ -1087,6 +1107,61 @@ impl Generator {
             self.env.declare_local(d.name.name.clone(), info);
         }
     }
+}
+
+/// Drop the natives nobody called and renumber the `sysreq.c` operands.
+///
+/// `ffcall()` (sc3.c:1856) hands out a native's id at its first *call*
+/// (`sym->addr = ntv_funcid++`), so amxxpc's table holds only the natives the
+/// plugin really uses. [`Generator::collect_func`] numbers them at *declaration*
+/// instead, because a single pass has to know the id before it can emit the call:
+/// left as-is, the table exports every native of every include the plugin pulls in
+/// (758 entries where amxxpc writes 49 for `zp50_flashlight.sma`), which the AMX
+/// Mod X loader then has to resolve one by one at load.
+///
+/// Renumbering in order of first appearance in the emitted stream reproduces
+/// amxxpc's call order, because both walk the code in the same direction.
+///
+/// Entries are keyed by *exported name*, not by declaration: `float.inc` aliases
+/// several `operator+` overloads to the same `floatadd`, and the host binds the
+/// table by name, so two declarations of one native must share one entry.
+fn prune_natives(code: &mut [AsmItem], declared: &[String]) -> Vec<String> {
+    let mut new_index: HashMap<i32, i32> = HashMap::new();
+    let mut by_name: HashMap<&str, i32> = HashMap::new();
+    let mut kept: Vec<String> = Vec::new();
+
+    for item in code.iter_mut() {
+        let AsmItem::Insn { opcode: Opcode::SysreqC, operands } = item else {
+            continue;
+        };
+        let Some(crate::stream::Operand::Imm(index)) = operands.first_mut() else {
+            continue;
+        };
+        let mapped = match new_index.get(index) {
+            Some(&mapped) => mapped,
+            None => {
+                // An id with no declaration would be a codegen bug; leaving the
+                // operand alone keeps the stream diffable instead of panicking.
+                let Some(name) = declared.get(*index as usize) else {
+                    continue;
+                };
+                let mapped = match by_name.get(name.as_str()) {
+                    Some(&mapped) => mapped,
+                    None => {
+                        let mapped = kept.len() as i32;
+                        kept.push(name.clone());
+                        by_name.insert(name.as_str(), mapped);
+                        mapped
+                    }
+                };
+                new_index.insert(*index, mapped);
+                mapped
+            }
+        };
+        *index = mapped;
+    }
+
+    kept
 }
 
 /// Gather every `new` declarator in a body and the name of the first

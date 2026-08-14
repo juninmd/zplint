@@ -315,9 +315,15 @@ Sources: sc5-in.scp
 - 202 wrong arg count (needs in-file definition table; natives need include tables)
 - 203/204 unused / write-only symbols (dead-code signal)
 - 208 Float function used before definition (forces reparse)
-- 209 mixed return paths — in AMXX callbacks a fall-off returns 0 = PLUGIN_CONTINUE /
-  HAM_IGNORED, so an explicit-return-elsewhere callback silently doesn't block. High value,
-  FP-prone; revisit with better return-path analysis.
+- `[rule: mixed_return]` 209 mixed return paths — a bare `return` hands the caller 0. For a
+  command/forward that is PLUGIN_CONTINUE; for a Ham or fakemeta hook it is outside the
+  documented enum entirely (verified in ham_const.inc/fakemeta_const.inc: HAM_IGNORED and
+  FMRES_IGNORED are both **1**, not 0), so the hook neither ignores nor supercedes cleanly.
+  Deliberately narrow: only `return` as the leading token of a statement counts. The braceless
+  `if (...) return` guard is the single most common line in AMXX and amxxpc already warns on
+  it, so counting it here would bury the report — that half stays with the compiler.
+  Corpus: 1 hit (`zp50_ap_combo.sma:94`, a `fw_TakeDamage` mixing `HAM_IGNORED` with a bare
+  return), 0 in the official plugins.
 - 217 loose indentation (mixed tabs/spaces) — cosmetic; users suppress with `#pragma tabsize 0`.
 
 ---
@@ -331,6 +337,11 @@ The most common AMXX runtime error (per official Debugging wiki).
 - **[rule: player_array_32]** `new arr[32]` indexed by `id` (player ids are 1..32; need [33] /
   MAX_PLAYERS+1). Fills up only on a full server — classic "crashes only under load".
 - Entity index (create_entity/find_ent_by_class returns up to ~2048) into a [33] player array.
+- **[rule: random_num_bound]** `random_num(0, sizeof arr)` / `random_num(0, ArraySize(a))` —
+  amxmodx's `random_num(a, b)` bound is **inclusive** (`Returns a random number between a and b
+  (inclusive)`), so a bare `sizeof` returns one past the last index. The correct form is
+  `sizeof arr - 1`. Detection only fires when the sizeof/ArraySize call is the *whole* second
+  argument, so the correct `- 1` form never matches (all 26 corpus sites use it).
 Sources: https://wiki.alliedmods.net/Debugging_Plugins_(AMX_Mod_X) ·
 https://forums.alliedmods.net/showthread.php?t=150704 ·
 https://www.amxmodx.org/api/amxmodx/get_user_userid
@@ -342,6 +353,36 @@ recursion (a register_message handler emitting the same message; ExecuteHam of t
 Ham inside its own hook).
 Sources: http://www.amxmodx.org/doc/source/scripting/debug.htm ·
 https://forums.alliedmods.net/archive/index.php/t-318486.html
+
+### 3.2b Hook re-entry recursion `[rules: ham_recursion, message_recursion, kill_in_killed_hook]`
+The three concrete shapes of the re-entry noted above, each detected by correlating the
+registration with the body of the callback it names:
+- `[rule: ham_recursion]` `ExecuteHamB(Ham_X, ...)` inside the function registered as the
+  `Ham_X` hook. hamsandwich.inc's own note on ExecuteHamB is "Be very careful about
+  recursion": unlike `ExecuteHam`, the B variant re-fires **every** registered hook of that
+  function, including the one currently running. Escape hatches (all documented): plain
+  `ExecuteHam()`, `SetHamParam*` when the goal is only to change an argument, or
+  `Disable/EnableHamForward` around the call — a body using either Ham-forward toggle is
+  therefore not flagged.
+- `[rule: message_recursion]` `message_begin(_, MSG, ...)` inside the `register_message(MSG,
+  ...)` handler. `emessage_begin()` exists precisely for this: it sends the message without
+  re-triggering AMXX message hooks.
+- `[rule: kill_in_killed_hook]` `user_kill()` / `DLLFunc_ClientKill` inside a `Ham_Killed`
+  callback — the kill walks the death path again, which fires `Ham_Killed` again.
+Real-world reach: 19 `ham_recursion` + 1 `message_recursion` hits in the 542-file corpus,
+0 in the official amxmodx plugins.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/plugins/include/hamsandwich.inc ·
+https://wiki.alliedmods.net/HamSandwich_General_Usage_(AMX_Mod_X) ·
+https://forums.alliedmods.net/archive/index.php/t-208467.html
+
+### 3.2c Direct self-recursion `[rule: self_recursion]`
+amxxpc's warning **234** ("recursive function", the last code in `sc5-in.scp`) on an AMX whose
+default stack is 4096 cells: every level costs a frame plus all the function's locals, so any
+data-driven depth ends in run time error 3. Only *direct* self-calls are detected (a whole-word
+match on the function's own name inside its own body, so `Show_Menu` calling `Show_Menu_Next`
+is not recursion); mutual recursion would need a call graph.
+Corpus: 1 hit (`zp50_addon_level_system.sma:497`, `check_level_up()` re-entering itself once per
+level gained), 0 in the official plugins.
 
 ### 3.3 Run time error 10: native error
 - pev/set_pev/entity_* on stale/unvalidated entity ("[FAKEMETA] Invalid entity") — Think
@@ -413,6 +454,18 @@ remove_entity path → accumulates until fatal "ED_Alloc: no free edicts".
 Sources: https://www.moddb.com/tutorials/fixing-ed-alloc-no-free-edicts ·
 https://forums.alliedmods.net/showthread.php?t=312475
 
+### 4.2b Message argument/field contracts `[rules: msg_arg_index, write_literal_range]`
+- **[rule: msg_arg_index]** message arguments are **1-based**. amxmodx/messages.cpp guards
+  every accessor with `if (index < 1 || index > m_CurParam)` and raises "Invalid message
+  argument %d" (run time error 10), so a literal `get_msg_arg_int(0)` always throws.
+- **[rule: write_literal_range]** the HL message protocol writes fixed-width fields, so an
+  over-wide literal is silently truncated on the wire: `write_byte(300)` arrives as 44.
+  Ranges: byte `-128..255` (negative flag-style values like `-1` are the usual 0xFF idiom and
+  stay legal), char `-128..127`, short `-32768..32767`. Only literals are checked — an
+  expression's range is not knowable here.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/amxmodx/messages.cpp ·
+https://www.amxmodx.org/api/messages · https://www.amxmodx.org/api/message_const
+
 ### 4.3 Network overflow `[rule: te_reliable]`
 SVC_TEMPENTITY belongs on the unreliable datagram (MSG_BROADCAST/MSG_PVS/MSG_ONE_UNRELIABLE).
 MSG_ALL/MSG_ONE force the reliable channel; per-frame/per-hit emission overflows the 4KB
@@ -425,10 +478,12 @@ The client stufftext filter rejects commands containing the substring "loading" 
 on every client. Confirmed: amxmodx issue #818.
 Sources: https://github.com/alliedmodders/amxmodx/issues/818
 
-### 4.5 String hunk exhaustion (EngFunc_AllocString)
+### 4.5 String hunk exhaustion (EngFunc_AllocString) `[rule: allocstring_hotpath]`
 Allocates from the map hunk on EVERY call (even identical strings), freed only on map change.
 Per-frame use (custom weapon viewmodels in PreThink) → "Hunk_Alloc: failed" crash. Cache the
-handle in a static. (Deferred: needs hook-registration correlation to stay FP-safe.)
+handle in a static. Scoped to the two contexts where the call is provably repeated — inside a
+loop body, or inside a per-frame/per-touch callback (PreThink/PostThink/Think/Touch/
+PlayerMove/StartFrame/AddToFullPack) — so the one-shot `plugin_precache` idiom stays clean.
 Sources: https://forums.alliedmods.net/archive/index.php/t-299492.html
 
 ### 4.6 HUD channels `[rule: hud_channel_range]`
@@ -444,8 +499,16 @@ Sources: https://www.amxmodx.org/api/amxmodx/change_level
 ### 4.8 Forward return contracts
 - client_command: PLUGIN_HANDLED stops OTHER plugins' handlers too; amxconst.inc defines
   PLUGIN_HANDLED_MAIN specifically for "stop command, continue plugins". `[rule: client_command_handled]`
-- say/say_team hooks ending in unconditional PLUGIN_HANDLED eat all server chat.
+- **[rule: say_hook_handled]** say/say_team hooks ending in unconditional PLUGIN_HANDLED eat
+  all server chat (and starve every other plugin's say hook). Only flagged when *every* exit
+  of the handler is `return PLUGIN_HANDLED` at the function's own brace level — the official
+  `adminchat.sma` shape (guards returning PLUGIN_CONTINUE, PLUGIN_HANDLED only once the
+  handler really consumed the message) is correct and stays quiet.
 - Fakemeta register_forward callbacks must return FMRES_*; fall-off returns 0 (invalid).
+  **Deliberately not a rule**: a first implementation flagged 162 of the corpus's 611
+  register_forward sites, overwhelmingly `*_Post` callbacks whose return value the module
+  ignores, and a 0 is treated as "ignored" in practice rather than crashing. Left documented
+  until someone establishes an observable consequence worth an entry in a report.
 Sources: https://github.com/alliedmodders/amxmodx/blob/master/plugins/include/amxconst.inc ·
 https://wiki.alliedmods.net/FakeMeta_General_Usage_(AMX_Mod_X)
 
@@ -463,6 +526,39 @@ low real-world reach (only 1 call site in the 542-file corpus, already using the
 form), but the check is a single regex line, so the cost is effectively zero.
 Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/geoip.inc
 
+### 4.11 Dynamic handle ownership (cellarray / celltrie / datapack)
+cellarray.inc and celltrie.inc state the contract explicitly: "the plugin is responsible for
+freeing all handles it acquires ... failing to free them results in the plugin AND AMXX
+leaking memory". AMXX does not garbage-collect these; they live until the plugin unloads.
+- **[rule: handle_leak]** `ArrayCreate/ArrayClone/TrieCreate/TrieSnapshotCreate/CreateDataPack`
+  assigned to a **local** (`new h = ...`) that the function never frees. Every call leaks a
+  whole container. Globals are deliberately excluded — a handle created once in
+  `plugin_init`/`plugin_precache` and kept for the plugin's lifetime is the intended pattern
+  (the official imessage/mapchooser/plmenu plugins all do it). Ownership hand-off is excluded
+  too: `return h`, or `h` passed as a non-first argument to another call (stored elsewhere).
+  Confirmed against the official testsuite: `sorttest.sma` (3 sites) and `arraytest.sma` leak
+  exactly this way.
+- **[rule: handle_use_after_destroy]** touching a handle after `ArrayDestroy/TrieDestroy/
+  TrieSnapshotDestroy/DestroyDataPack/menu_destroy/fclose` freed it → the native runs on
+  handle 0 (run time error 10). ArrayDestroy's doc notes it even zeroes the variable by
+  reference "to aid in preventing accidental usage after destroy". Restricted to
+  straight-line code (same brace depth, no intervening `return`/`case`/`else`/reassignment):
+  the ubiquitous `if (item == MENU_EXIT) { menu_destroy(menu); return }` guard destroys on a
+  branch that never reaches the later use, and must not be flagged.
+Sources: https://www.amxmodx.org/api/cellarray/ArrayCreate ·
+https://www.amxmodx.org/api/cellarray/ArrayDestroy · https://www.amxmodx.org/api/celltrie/__raw ·
+https://www.amxmodx.org/api/amxmodx/plugin_end
+
+### 4.12 Repeating task outliving its player `[rule: task_no_remove]`
+`set_task(..., id, ..., "b")` keyed by a player index keeps firing after that player leaves:
+the callback then runs player natives on an empty slot (run time error 10) or, worse, on the
+next client to take the slot. `remove_task(id)` in `client_disconnected` is the fix.
+Kept FP-safe by only flagging files that contain **no `remove_task()` at all** and whose task
+id argument names a player (id/player/victim/attacker/index/user/client).
+Sources: https://www.amxmodx.org/api/amxmodx/set_task ·
+https://www.amxmodx.org/api/amxmodx/remove_task ·
+https://wiki.alliedmods.net/Advanced_Scripting_(AMX_Mod_X)
+
 ---
 
 ## 5. Performance (documented anti-patterns, Optimizing Plugins wiki)
@@ -476,8 +572,10 @@ Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/
   per call); fopen/fgets/fclose are O(n).
 - Repeated pure native call in if/else-if chain (compiler never caches native results).
 - Same hardcoded string literal duplicated — compiler does not dedup literals in DATA.
-- cs_set_user_model per frame is redundant (module re-applies automatically) and legacy
-  userinfo-based model change per frame historically caused svc_bad kicks.
+- `[rule: cs_model_hotpath]` cs_set_user_model per frame is redundant (module re-applies
+  automatically) and legacy userinfo-based model change per frame historically caused svc_bad
+  kicks. Scoped like allocstring_hotpath: inside a loop, or inside a per-frame/per-touch
+  callback.
 Sources: https://wiki.alliedmods.net/Optimizing_Plugins_(AMX_Mod_X_Scripting) ·
 https://www.amxmodx.org/api/cstrike/cs_set_user_model
 
@@ -536,8 +634,10 @@ Sources: zp50_items.sma · zp50_item_infection_bomb.sma · zp50_items_const.inc
 ### 6.6 Other zp50 contracts (documented, lower priority)
 - zp_fw_core_last_zombie also fires for the FIRST zombie (include doc) — last-zombie buffs
   need zp_core_is_first_zombie/zombie_count checks.
-- Unconditional PLUGIN_HANDLED in zp_fw_core_infect_pre deadlocks round start (first zombie
-  can never be made).
+- **[rule: zp_infect_pre_handled]** Unconditional PLUGIN_HANDLED in zp_fw_core_infect_pre
+  (or `_cure_pre`) deadlocks round start (first zombie can never be made). "Unconditional"
+  means *every* exit of the handler returns PLUGIN_HANDLED: a nested `if (...) return
+  PLUGIN_HANDLED` guard with a PLUGIN_CONTINUE path is the correct, common shape.
 - zp_*_menu_text_add only meaningful inside the matching select_pre forward.
 - Mixing ZP 4.3 API (`#include <zombieplague>`, zp_get_user_zombie, zp_register_extra_item)
   with zp50 includes → "missing natives" load failure without the compat addon. `[rule: zp43_mixing]`
@@ -550,6 +650,34 @@ Sources: zp50_items.sma · zp50_item_infection_bomb.sma · zp50_items_const.inc
   special-cases `zp_core_get_human_count() == 1` → Ham_Killed).
 Sources: zp50_core.inc · zp50_changelog.txt · zp50_item_infection_bomb.sma ·
 https://forums.alliedmods.net/archive/index.php/t-214127.html
+
+---
+
+### 7.0 `sizeof` as a max-chars length `[rule: sizeof_string_len]`
+string.inc's global note: "all string functions which take in a writable buffer and maximum
+length should NOT have the null terminator INCLUDED in the length. This means that this is
+valid: `copy(string, charsmax(string), ...)`". amxmodx/string.cpp's `set_amxstring` implements
+exactly that — `while (max-- && *source) *dest++ = ...; *dest = 0;` — so `max = N` writes
+**N+1 cells**. `get_user_name(id, name, sizeof(name))` on `new name[32]` therefore writes
+`name[32]`, one cell past the array.
+Detection is deliberately narrow, driven by a curated `(native, buffer arg, length arg)` table:
+the sizeof must measure **the very buffer of that same call**. A sizeof of another array (a row
+count, a table length) is not a length bug, and the cell-count natives (`ArrayGetArray`,
+`get_array`, …) are absent from the table because `sizeof` is the *correct* form for them.
+Auto-fixable: the rewrite to `charsmax(buf)` is applied by `zplint fix` when the sizeof text
+occurs once on the line. Reported as a **warning**: 1240 sites in the 542-file corpus (legacy
+style), 0 in the official plugins.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/plugins/include/string.inc ·
+https://github.com/alliedmodders/amxmodx/blob/master/amxmodx/string.cpp
+
+### 7.0b Entity-keyed tasks `[rule: task_entity_not_validated]`
+Companion to §3.3: a `set_task` whose task id is an **entity** fires later, and by then
+remove_entity / a round restart / another plugin may have freed the edict. A callback that
+touches entity fields (`pev`, `set_pev`, `entity_get_*`, `ExecuteHam*`) without any
+`pev_valid`/`is_valid_ent` check hits "[FAKEMETA] Invalid entity" (run time error 10).
+Player-keyed tasks are out of scope here — §3.3/§6.1 cover the player-validity side.
+0 hits on both corpora: every entity task in the corpus already guards with `pev_valid`, which
+is precisely the idiom the rule asks for.
 
 ---
 

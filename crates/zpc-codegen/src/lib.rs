@@ -60,11 +60,12 @@
 //!
 //! * **Native indices.** `ffcall()` assigns `sym->addr = ntv_funcid++` at the first
 //!   *call*, during the write pass, so amxxpc numbers natives in call order, not
-//!   declaration order. Here they are numbered in declaration order because the
-//!   generator makes a single pass. The numbers are internal to the `.amx` (the
-//!   native table maps them to names), so this is a layout difference, not a
-//!   behavioural one - but a byte-level differential test against amxxpc will see
-//!   it.
+//!   declaration order. The generator makes a single pass and has to know the id
+//!   before it can emit the call, so it numbers natives at declaration and
+//!   `prune_natives()` renumbers the stream into first-call order at the end of
+//!   [`Generator::program`], dropping the ones never called. The numbers are
+//!   internal to the `.amx` (the native table maps them to names), so any
+//!   remaining difference is a layout one, not a behavioural one.
 //! * **`lastst` tracking.** Upstream suppresses the trailing `zero.pri; retn` when
 //!   the last statement was a `return` or `goto` (`sc1.c:3517`). Here the pair is
 //!   always emitted and [`peephole::optimise`] deletes it as unreachable code,

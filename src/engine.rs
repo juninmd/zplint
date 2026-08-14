@@ -618,6 +618,12 @@ static WARNING_RULES: &[&str] = &[
     "client_command_handled", "client_connect_actions", "contain_truthy",
     "strcmp_truthy", "sql_fieldname_truthy", "func_id_truthy", "format_injection", "string_assign", "hud_channel_range",
     "line_too_long",
+    // contract/style smells, not crashes: a chat-eating say hook still runs, and the
+    // per-frame model call is redundant work
+    "say_hook_handled", "cs_model_hotpath",
+    // one cell past the buffer, but the canonical amxmodx plugins ship it too - report it as
+    // a (auto-fixable) warning rather than failing CI on a decades-old idiom
+    "sizeof_string_len", "mixed_return", "self_recursion",
 ];
 
 pub(crate) fn iss(lineno: usize, message: String, rule_id: &'static str, fixable: bool) -> LintIssue {
@@ -1221,6 +1227,594 @@ public menu_main(id, menu, item) {
         assert_eq!(calls[0][0], "random_float(1.0, 2.0)");
         assert_eq!(calls[0][5], "\"a\"");
         assert_eq!(calls[0][6], "3");
+    }
+
+    #[test]
+    fn test_ham_recursion_is_flagged() {
+        let path = write_temp_sma("ham_recursion_bad", r#"public plugin_init() {
+    RegisterHam(Ham_TakeDamage, "player", "fw_Damage")
+}
+
+public fw_Damage(victim, inflictor, attacker, Float:damage, bits) {
+    ExecuteHamB(Ham_TakeDamage, victim, inflictor, attacker, damage * 2.0, bits)
+    return HAM_SUPERCEDE
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "ham_recursion"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_ham_recursion_other_forward_is_ok() {
+        // ExecuteHamB of a DIFFERENT Ham_ than the one being hooked does not re-enter,
+        // and Disable/EnableHamForward around the call is the documented escape hatch.
+        let path = write_temp_sma("ham_recursion_ok", r#"public plugin_init() {
+    RegisterHam(Ham_TakeDamage, "player", "fw_Damage")
+    RegisterHam(Ham_Killed, "player", "fw_Killed")
+}
+
+public fw_Damage(victim, inflictor, attacker, Float:damage, bits) {
+    ExecuteHamB(Ham_Killed, victim, attacker, 0)
+    return HAM_IGNORED
+}
+
+public fw_Killed(victim, attacker, shouldgib) {
+    DisableHamForward(g_KilledHook)
+    ExecuteHamB(Ham_Killed, victim, attacker, shouldgib)
+    EnableHamForward(g_KilledHook)
+    return HAM_IGNORED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "ham_recursion"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_message_recursion_is_flagged() {
+        let path = write_temp_sma("message_recursion_bad", r#"public plugin_init() {
+    register_message(g_MsgScreenFade, "message_screenfade")
+}
+
+public message_screenfade(msg_id, msg_dest, id) {
+    message_begin(MSG_ONE, g_MsgScreenFade, _, id)
+    write_short(0)
+    message_end()
+    return PLUGIN_HANDLED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "message_recursion"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_message_recursion_emessage_is_ok() {
+        let path = write_temp_sma("message_recursion_ok", r#"public plugin_init() {
+    register_message(g_MsgScreenFade, "message_screenfade")
+}
+
+public message_screenfade(msg_id, msg_dest, id) {
+    emessage_begin(MSG_ONE, g_MsgScreenFade, _, id)
+    ewrite_short(0)
+    emessage_end()
+    return PLUGIN_HANDLED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "message_recursion"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_handle_leak_is_flagged() {
+        let path = write_temp_sma("handle_leak_bad", r#"public show_list(id) {
+    new Array:list = ArrayCreate(32)
+    ArrayPushString(list, "one")
+    print_all(list)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "handle_leak"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_handle_leak_destroyed_or_global_is_ok() {
+        let path = write_temp_sma("handle_leak_ok", r#"public plugin_init() {
+    g_Names = ArrayCreate(32)
+}
+
+public show_list(id) {
+    new Array:list = ArrayCreate(32)
+    ArrayPushString(list, "one")
+    print_all(list)
+    ArrayDestroy(list)
+}
+
+Array:build_list() {
+    new Array:out = ArrayCreate(32)
+    return out
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "handle_leak"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_random_num_bound_is_flagged() {
+        let path = write_temp_sma("random_num_bound_bad", r#"public play_sound(id) {
+    emit_sound(id, CHAN_STATIC, g_Sounds[random_num(0, sizeof g_Sounds)], 1.0, ATTN_NORM, 0, PITCH_NORM)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "random_num_bound"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_random_num_bound_minus_one_is_ok() {
+        let path = write_temp_sma("random_num_bound_ok", r#"public play_sound(id) {
+    emit_sound(id, CHAN_STATIC, g_Sounds[random_num(0, sizeof g_Sounds - 1)], 1.0, ATTN_NORM, 0, PITCH_NORM)
+    emit_sound(id, CHAN_STATIC, g_More[random_num(0, sizeof(g_More) - 1)], 1.0, ATTN_NORM, 0, PITCH_NORM)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "random_num_bound"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_allocstring_hotpath_is_flagged() {
+        let path = write_temp_sma("allocstring_bad", r#"public fw_PlayerPreThink(id) {
+    engfunc(EngFunc_AllocString, "models/v_knife.mdl")
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "allocstring_hotpath"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_allocstring_in_precache_is_ok() {
+        let path = write_temp_sma("allocstring_ok", r#"public plugin_precache() {
+    g_Model = engfunc(EngFunc_AllocString, "models/v_knife.mdl")
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "allocstring_hotpath"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_handle_use_after_destroy_is_flagged() {
+        let path = write_temp_sma("uad_bad", r#"public load_list() {
+    new Array:list = ArrayCreate(32)
+    ArrayPushString(list, "one")
+    ArrayDestroy(list)
+    ArrayPushString(list, "two")
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "handle_use_after_destroy"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_handle_use_after_destroy_other_branch_is_ok() {
+        // The ubiquitous menu idiom: destroy on the exit path, keep using the handle on the
+        // path that did not destroy it.
+        let path = write_temp_sma("uad_ok", r#"public menu_main(id, menu, item) {
+    if (item == MENU_EXIT)
+    {
+        menu_destroy(menu)
+        return PLUGIN_HANDLED
+    }
+    new access, info[8], callback
+    menu_item_getinfo(menu, item, access, info, charsmax(info), _, _, callback)
+    menu_destroy(menu)
+    return PLUGIN_HANDLED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "handle_use_after_destroy"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_task_no_remove_is_flagged() {
+        let path = write_temp_sma("task_no_remove_bad", r#"public zp_user_infected_post(id, infector) {
+    set_task(1.0, "zombie_tick", id, _, _, "b")
+}
+
+public zombie_tick(id) {
+    set_user_health(id, get_user_health(id) + 1)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "task_no_remove"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_task_no_remove_with_cleanup_is_ok() {
+        let path = write_temp_sma("task_no_remove_ok", r#"public zp_user_infected_post(id, infector) {
+    set_task(1.0, "zombie_tick", id, _, _, "b")
+}
+
+public zombie_tick(id) {
+    set_user_health(id, get_user_health(id) + 1)
+}
+
+public client_disconnected(id) {
+    remove_task(id)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "task_no_remove"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_kill_in_killed_hook_is_flagged() {
+        let path = write_temp_sma("kill_in_killed_bad", r#"public plugin_init() {
+    RegisterHam(Ham_Killed, "player", "fw_Killed")
+}
+
+public fw_Killed(victim, attacker, shouldgib) {
+    user_kill(victim, 1)
+    return HAM_IGNORED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "kill_in_killed_hook"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_kill_outside_killed_hook_is_ok() {
+        let path = write_temp_sma("kill_in_killed_ok", r#"public plugin_init() {
+    RegisterHam(Ham_Killed, "player", "fw_Killed")
+}
+
+public fw_Killed(victim, attacker, shouldgib) {
+    set_user_health(victim, 0)
+    return HAM_IGNORED
+}
+
+public cmd_slay(id) {
+    user_kill(id, 1)
+    return PLUGIN_HANDLED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "kill_in_killed_hook"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_say_hook_handled_is_flagged() {
+        let path = write_temp_sma("say_handled_bad", r#"public plugin_init() {
+    register_clcmd("say", "cmd_say")
+}
+
+public cmd_say(id) {
+    new said[192]
+    read_args(said, charsmax(said))
+    log_chat(id, said)
+    return PLUGIN_HANDLED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "say_hook_handled"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_say_hook_with_continue_path_is_ok() {
+        // The official adminchat.sma shape: guard paths return PLUGIN_CONTINUE, and
+        // PLUGIN_HANDLED is only reached when the handler really consumed the message.
+        let path = write_temp_sma("say_handled_ok", r#"public plugin_init() {
+    register_clcmd("say", "cmd_say")
+}
+
+public cmd_say(id) {
+    new said[192]
+    read_args(said, charsmax(said))
+    if (said[0] != '@')
+    {
+        return PLUGIN_CONTINUE
+    }
+    log_chat(id, said)
+    return PLUGIN_HANDLED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "say_hook_handled"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_zp_infect_pre_handled_is_flagged() {
+        let path = write_temp_sma("zp_infect_pre_bad", r#"public zp_fw_core_infect_pre(id, infector) {
+    set_user_rendering(id)
+    return PLUGIN_HANDLED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "zp_infect_pre_handled"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_zp_infect_pre_conditional_is_ok() {
+        let path = write_temp_sma("zp_infect_pre_ok", r#"public zp_fw_core_infect_pre(id, infector) {
+    if (g_Immune[id])
+    {
+        return PLUGIN_HANDLED
+    }
+    return PLUGIN_CONTINUE
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "zp_infect_pre_handled"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_cs_model_hotpath_is_flagged() {
+        let path = write_temp_sma("cs_model_bad", r#"public fw_PlayerPreThink(id) {
+    cs_set_user_model(id, "zombie_source")
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "cs_model_hotpath"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_cs_model_on_spawn_is_ok() {
+        let path = write_temp_sma("cs_model_ok", r#"public zp_user_infected_post(id, infector) {
+    cs_set_user_model(id, "zombie_source")
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "cs_model_hotpath"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_sizeof_string_len_is_flagged() {
+        let path = write_temp_sma("sizeof_len_bad", r#"public show(id) {
+    new name[32]
+    get_user_name(id, name, sizeof(name))
+    new msg[128]
+    formatex(msg, sizeof msg, "hi %s", name)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        let hits: Vec<_> = issues.iter().filter(|i| i.rule_id == "sizeof_string_len").collect();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|i| i.auto_fixable));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_sizeof_of_another_array_or_cell_count_is_ok() {
+        // charsmax is the correct form; a sizeof measuring a DIFFERENT array is not a length
+        // bug; and ArrayGetArray's size parameter counts CELLS, where sizeof is correct.
+        let path = write_temp_sma("sizeof_len_ok", r#"public show(id) {
+    new name[32]
+    get_user_name(id, name, charsmax(name))
+    new dest[64]
+    copy(dest, charsmax(dest), g_models[random_num(0, sizeof g_models - 1)])
+    new cells[3]
+    ArrayGetArray(g_Vectors, 0, cells, sizeof(cells))
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "sizeof_string_len"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_task_entity_not_validated_is_flagged() {
+        let path = write_temp_sma("task_ent_bad", r#"public throw_nade(id) {
+    new ent = create_entity("info_target")
+    set_task(3.0, "Task_Explode", ent)
+}
+
+public Task_Explode(ent) {
+    new Float:origin[3]
+    pev(ent, pev_origin, origin)
+    remove_entity(ent)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "task_entity_not_validated"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_task_entity_with_pev_valid_is_ok() {
+        let path = write_temp_sma("task_ent_ok", r#"public throw_nade(id) {
+    new ent = create_entity("info_target")
+    set_task(3.0, "Task_Explode", ent)
+}
+
+public Task_Explode(ent) {
+    if (!pev_valid(ent)) return
+    new Float:origin[3]
+    pev(ent, pev_origin, origin)
+    remove_entity(ent)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "task_entity_not_validated"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_mixed_return_is_flagged() {
+        let path = write_temp_sma("mixed_return_bad", r#"public fw_TakeDamage(victim, inflictor, attacker, Float:damage, bits) {
+    if (victim == attacker)
+    {
+        return HAM_IGNORED
+    }
+    if (g_Frozen[victim])
+    {
+        return
+    }
+    return HAM_IGNORED
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "mixed_return"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_consistent_returns_are_ok() {
+        let path = write_temp_sma("mixed_return_ok", r#"public fw_TakeDamage(victim, inflictor, attacker, Float:damage, bits) {
+    if (victim == attacker)
+    {
+        return HAM_IGNORED
+    }
+    return HAM_SUPERCEDE
+}
+
+public task_tick(id) {
+    if (!is_user_alive(id))
+    {
+        return
+    }
+    set_user_health(id, 100)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "mixed_return"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_msg_arg_index_zero_is_flagged() {
+        let path = write_temp_sma("msg_arg_bad", r#"public message_damage(msg_id, msg_dest, id) {
+    new dmg = get_msg_arg_int(0)
+    set_msg_arg_int(0, ARG_LONG, dmg)
+    return PLUGIN_CONTINUE
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert_eq!(issues.iter().filter(|i| i.rule_id == "msg_arg_index").count(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_msg_arg_index_one_is_ok() {
+        let path = write_temp_sma("msg_arg_ok", r#"public message_damage(msg_id, msg_dest, id) {
+    new dmg = get_msg_arg_int(2)
+    set_msg_arg_int(2, ARG_LONG, dmg)
+    return PLUGIN_CONTINUE
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "msg_arg_index"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_write_literal_range_is_flagged() {
+        let path = write_temp_sma("write_range_bad", r#"public fade(id) {
+    message_begin(MSG_ONE, g_MsgFade, _, id)
+    write_short(1<<12)
+    write_byte(300)
+    message_end()
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "write_literal_range"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_write_literal_in_range_is_ok() {
+        let path = write_temp_sma("write_range_ok", r#"public fade(id) {
+    message_begin(MSG_ONE, g_MsgFade, _, id)
+    write_byte(255)
+    write_byte(-1)
+    write_short(4096)
+    message_end()
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "write_literal_range"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_self_recursion_is_flagged() {
+        let path = write_temp_sma("self_recursion_bad", r#"check_level_up(id) {
+    if (g_Xp[id] < next_level_xp(id))
+        return
+    g_Level[id]++
+    check_level_up(id)
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(issues.iter().any(|issue| issue.rule_id == "self_recursion"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_call_to_similarly_named_function_is_ok() {
+        // `Show_Menu` calling `Show_Menu_Next` is not recursion - the name must match whole.
+        let path = write_temp_sma("self_recursion_ok", r#"public Show_Menu(id) {
+    Show_Menu_Next(id)
+}
+
+public Show_Menu_Next(id) {
+    client_print(id, print_chat, "next")
+}
+"#);
+
+        let issues = lint_file(&path, &RulesConfig::default());
+        assert!(!issues.iter().any(|issue| issue.rule_id == "self_recursion"));
+        std::fs::remove_file(path).unwrap();
     }
 
     fn write_temp_sma(name: &str, content: &str) -> std::path::PathBuf {

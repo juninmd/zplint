@@ -51,5 +51,14 @@ fn apply_fix(line: &str, issue: &crate::rules::LintIssue) -> Option<String> {
             }
         }
     }
+    if issue.rule_id == "sizeof_string_len" {
+        for (_, buf, sizeof_text) in crate::detectors::sizeof_len_sites(line) {
+            // Only rewrite when the sizeof appears once on the line: the same text elsewhere
+            // (a declaration `new other[sizeof buf]`) must not be touched.
+            if line.matches(sizeof_text.as_str()).count() == 1 {
+                return Some(line.replace(&sizeof_text, &format!("charsmax({})", buf)));
+            }
+        }
+    }
     None
 }

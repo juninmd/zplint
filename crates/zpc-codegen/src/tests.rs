@@ -223,6 +223,54 @@ fn a_native_call_uses_sysreq_c_and_the_caller_cleans_the_stack() {
 }
 
 #[test]
+fn an_uncalled_native_never_reaches_the_table() {
+    // amxxpc numbers a native at its first call (ffcall(), `ntv_funcid++`), so a
+    // header's worth of unused declarations must not be exported: the AMX Mod X
+    // loader resolves every entry of this table at load.
+    let unit = compile("native unused_a(); native used(a); native unused_b(); foo() { used(1); }");
+    assert_eq!(unit.natives, ["used"]);
+}
+
+#[test]
+fn pruning_renumbers_the_sysreq_operands() {
+    // The `sysreq.c` operand indexes the native table, so dropping entries has to
+    // renumber the calls - the second native declared becomes index 0 here.
+    let unit = compile("native first(); native second(); foo() { second(); }");
+    assert_eq!(unit.natives, ["second"]);
+    assert_eq!(imms_of(&unit.code, Opcode::SysreqC), [0]);
+
+    // Two live natives keep first-call order, not declaration order.
+    let unit = compile("native a(); native b(); foo() { b(); a(); b(); }");
+    assert_eq!(unit.natives, ["b", "a"]);
+    assert_eq!(imms_of(&unit.code, Opcode::SysreqC), [0, 1, 0]);
+}
+
+#[test]
+fn two_declarations_of_one_native_share_a_table_entry() {
+    // float.inc aliases several `operator+` overloads to `floatadd`; the host
+    // binds the table by name, so one name is one entry.
+    let unit = compile(
+        "native Float:operator+(Float:a, Float:b) = floatadd;
+         native Float:operator+(Float:a, b) = floatadd;
+         foo(Float:a, Float:b, c) { new Float:x = a + b; new Float:y = a + c; }",
+    );
+    assert_eq!(unit.natives, ["floatadd"]);
+    assert_eq!(imms_of(&unit.code, Opcode::SysreqC), [0, 0]);
+}
+
+#[test]
+fn a_public_global_reaches_the_pubvar_table() {
+    // declglb(): a `public` global is exported with its data address, and the
+    // host binds it by name at load (MaxClients, NULL_VECTOR, ...). The `@`
+    // prefix is public without the keyword.
+    let unit = compile("new pad[4]; public MaxClients; new tail; public @shared;");
+    assert_eq!(unit.pubvars, [("MaxClients".to_string(), 16), ("@shared".to_string(), 24)]);
+
+    let unit = compile("new plain; static hidden;");
+    assert!(unit.pubvars.is_empty(), "only `public` globals are exported: {:?}", unit.pubvars);
+}
+
+#[test]
 fn a_reference_argument_is_passed_by_address() {
     let ops = body_ops("bar(&a) {} foo() { new x; bar(x); }");
     assert!(ops.windows(2).any(|w| w == [Opcode::AddrPri, Opcode::PushPri]), "got {ops:?}");
@@ -1054,9 +1102,13 @@ const FLOAT_OPS: &str = r#"
 #[test]
 fn an_operator_overload_is_registered_under_its_mangled_name() {
     // `native Float:operator*(...) = floatmul;` has no legal exported name of
-    // its own, so the *alias* is what reaches the native table.
-    let unit = compile(FLOAT_OPS);
-    assert_eq!(unit.natives, ["floatmul", "floatdiv", "floatadd", "floatsub"]);
+    // its own, so the *alias* is what reaches the native table - once the
+    // operator is used, since prune_natives() drops the natives nobody calls.
+    let src = format!("{FLOAT_OPS} foo(Float:a, Float:b) {{ return _:(a * b / a + b - a); }}");
+    let unit = compile(&src);
+    let mut registered = unit.natives.clone();
+    registered.sort();
+    assert_eq!(registered, ["floatadd", "floatdiv", "floatmul", "floatsub"]);
     assert!(
         !unit.diags.items().iter().any(|d| d.is_error()),
         "declaring an operator must no longer be error 7: {:?}",

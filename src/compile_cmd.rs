@@ -167,6 +167,15 @@ fn build_image(
     publics.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
     image.publics = publics;
 
+    // Public globals. `Image::build` sorts them by name, which is what
+    // `amx_FindPubVar`'s binary search needs; the host binds `MaxClients`,
+    // `MapName`, `NULL_STRING` and `NULL_VECTOR` through it at load.
+    image.pubvars = unit
+        .pubvars
+        .iter()
+        .map(|(name, addr)| zpc_asm::Symbol::new(name.clone(), *addr))
+        .collect();
+
     image.build().map_err(|e| format!("cannot build AMX image: {e:?}"))
 }
 
