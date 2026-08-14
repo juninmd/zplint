@@ -120,7 +120,10 @@ pub fn find_publics(raw: &str) -> Vec<&str> {
 }
 
 pub fn find_nonpublics(raw: &str, publics: &[&str]) -> Vec<String> {
-    let re = Regex::new(r"(?m)^([A-Za-z_]\w*)\s*\([^;{]*\)\s*(?:\{)?\s*$").unwrap();
+    // Bare definitions (`FinishingBlow(target, attacker)`) and `stock`/`static` ones, with an
+    // optional return tag. Stock helpers must be in this list or enclosing_function_name
+    // cannot recognise them and blames the function above instead.
+    let re = Regex::new(r"(?m)^(?:(?:stock|static)\s+)*(?:[A-Za-z_]\w*:)?([A-Za-z_]\w*)\s*\([^;{]*\)\s*(?:\{)?\s*$").unwrap();
     let all: Vec<String> = re.captures_iter(raw)
         .map(|c| c.get(1).unwrap().as_str().to_string())
         .collect();

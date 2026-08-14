@@ -363,7 +363,10 @@ registration with the body of the callback it names:
   function, including the one currently running. Escape hatches (all documented): plain
   `ExecuteHam()`, `SetHamParam*` when the goal is only to change an argument, or
   `Disable/EnableHamForward` around the call — a body using either Ham-forward toggle is
-  therefore not flagged.
+  therefore not flagged. Neither is a hand-rolled re-entry flag (`if (g_Reflecting) return`
+  on the way in, `g_Reflecting = true/false` around the call): it bounds the recursion at one
+  level, which is what the rule asks for. The flag is matched anywhere in a condition, since
+  it is usually folded into a compound early return.
 - `[rule: message_recursion]` `message_begin(_, MSG, ...)` inside the `register_message(MSG,
   ...)` handler. `emessage_begin()` exists precisely for this: it sends the message without
   re-triggering AMXX message hooks.

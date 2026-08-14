@@ -512,6 +512,8 @@ static RE_REGISTERHAM_ANY: LazyLock<Regex> = LazyLock::new(|| {
 static RE_SET_HAM_PARAM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bSetHamParam(Integer|Float)\s*\(\s*(\d+)\s*,").unwrap()
 });
+// `flag = true` in a squashed body - one half of a hand-rolled re-entry guard.
+static RE_BOOL_FLAG_SET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\w+)=true\b").unwrap());
 // ExecuteHamB re-fires every registered hook of that Ham_ function (ExecuteHam does not).
 static RE_EXECUTE_HAM_B: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bExecuteHamB\s*\(\s*(Ham_\w+)").unwrap()
@@ -1559,6 +1561,22 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                 if !hooks.iter().any(|(h, cb)| h == ham && *cb == func) { continue; }
                 let body = enclosing_body(lines, i);
                 if body.contains("DisableHamForward") || body.contains("EnableHamForward") { continue; }
+                // Hand-rolled re-entry guard: a flag raised around the call and tested on the
+                // way in (`if (g_Reflecting) return` ... `g_Reflecting = true; ExecuteHamB(..)`).
+                // It bounds the recursion at one level, which is the whole point of the rule.
+                // The test is usually folded into a compound early-return
+                // (`if (g_Reflecting || !is_user_alive(victim)) return`), so look for the flag
+                // anywhere in a condition rather than for a bare `if (flag)`.
+                let body_sq = squash(&body);
+                if RE_BOOL_FLAG_SET.captures_iter(&body_sq).any(|c| {
+                    let flag = c.get(1).unwrap().as_str();
+                    Regex::new(&format!(r"\b{}\b", regex::escape(flag))).is_ok_and(|re| {
+                        body.lines().any(|l| {
+                            let t = l.trim_start();
+                            (t.starts_with("if") || t.starts_with("while")) && re.is_match(t)
+                        })
+                    })
+                }) { continue; }
                 issues.push(iss(i + 1, format!("ExecuteHamB({}) inside \"{}\", which is itself the {} hook - it re-fires this same callback forever (run time error 3: stack error); use ExecuteHam() (no hooks), SetHamParam* to change arguments, or Disable/EnableHamForward around the call", ham, func, ham), "ham_recursion", false));
             }
         }

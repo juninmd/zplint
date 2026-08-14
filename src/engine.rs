@@ -38,7 +38,17 @@ static RE_MSG_BEGIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:e?mess
 static RE_MSG_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\be?message_end\s*\(|EngFunc_MessageEnd\b").unwrap());
 static RE_MSG_WRITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\be?write_(?:byte|char|short|long|entity|angle|angle_f|coord|coord_f|string)\s*\(").unwrap());
 static RE_MSG_HOOK_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:get_msg_(?:args|argtype|arg_int|arg_float|arg_string|origin)|set_msg_arg_(?:int|float|string))\s*\(").unwrap());
-static RE_FUNCTION_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(?:public\s+)?([A-Za-z_]\w*)\s*\(").unwrap());
+// `stock`/`static` (and a return tag) have to be accepted here: without them the upward walk
+// in enclosing_function_name skips a stock definition entirely and attributes its body to the
+// public function above it - the wrong function for every rule that asks "where am I?".
+// Anchored at column 0: a Pawn definition is always top-level, while an indented
+// `fm_cs_set_user_money(...)` is a CALL. Without the anchor a call to a known function reads
+// as a definition and the walk stops at the wrong place.
+static RE_FUNCTION_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:(?:public|stock|static)\s+)*(?:[A-Za-z_]\w*:)?([A-Za-z_]\w*)\s*\(").unwrap());
+// A real use of `attacker`: handed to a player-mutating/query native, or used as an index.
+static RE_ATTACKER_RISKY_USE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:set_user_\w+|cs_set_\w+|cs_get_\w+|get_user_\w+|zp_\w+|ExecuteHamB?)\s*\([^)]*\battacker\b|\[\s*attacker\s*\]").unwrap()
+});
 static RE_ARRAY_RANDOM_SIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bArray(?:GetString|GetCell|GetArray)\s*\([^,]+,\s*random_num\s*\(\s*0\s*,\s*ArraySize\s*\(\s*([A-Za-z_]\w*)\s*\)\s*-\s*1\s*\)").unwrap());
 static RE_FOPEN_ASSIGN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:new\s+)?([A-Za-z_]\w*)\s*=\s*fopen\s*\(").unwrap());
 static _RE_MAXPLAYERS_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#define\s+MAXPLAYERS\s+32").unwrap());
@@ -250,15 +260,19 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         // 18. attacker_not_validated - fw_TakeDamage/Ham_TakeDamage handlers using attacker without guard
         if config.attacker_not_validated && RE_TAKE_DAMAGE.is_match(stripped) {
             let body = enclosing_body(&lines_clean, i);
-            let body_sq = squash(&body);
+            // The signature line is dropped first: `attacker` in the parameter list is not a
+            // use, and a handler that only ever touches `victim` (world damage is a legitimate
+            // trigger) must not be flagged just for declaring the parameter.
+            let body_wo_header = body.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+            let body_sq = squash(body_wo_header);
             let has_user_alive_check = body_sq.contains("is_user_alive(attacker)")
                 || body_sq.contains("is_user_connected(attacker)")
-                || body_sq.contains("!attacker");
-            if !has_user_alive_check && (body.contains("attacker") || body.contains("g_attacker")) {
-                // Only flag if attacker is actually used in a risky context
-                if body.contains("set_user_") || body.contains("cs_set_") || body.contains("zp_") {
-                    issues.push(iss(lineno, "TakeDamage handler uses 'attacker' without is_user_alive guard (attacker can be 0/world)".into(), "attacker_not_validated", false));
-                }
+                || body_sq.contains("!attacker")
+                || body_sq.contains("attacker<1")
+                || body_sq.contains("attacker>0")
+                || body_sq.contains("attacker==0");
+            if !has_user_alive_check && RE_ATTACKER_RISKY_USE.is_match(body_wo_header) {
+                issues.push(iss(lineno, "TakeDamage handler uses 'attacker' without is_user_alive guard (attacker can be 0/world)".into(), "attacker_not_validated", false));
             }
         }
 
