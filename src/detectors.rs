@@ -431,6 +431,15 @@ static RE_HAM_DAMAGE_CALL: LazyLock<Regex> = LazyLock::new(|| {
 static RE_ENGINE_CALLBACK_FN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(think|touch|takedamage|killed|prethink|postthink|spawn|blocked|traceattack|keyvalue|addtofullpack)").unwrap()
 });
+// get_tr2 com membro float/vetor SEM o 3o parametro por referencia. O fakemeta faz
+//     case TR_flFraction: ptr = MF_GetAmxAddr(amx, params[3]); *ptr = ...
+// sem checar a contagem de argumentos (o set_tr2 checa, o get_tr2 nao). Chamado com
+// 2 argumentos ele le params[3] fora do array e ESCREVE no endereco que sair dali.
+// Derrubou o servidor de producao: SIGSEGV em fakemeta_amxx_i386.so!get_tr2+228,
+// em zp50_gamemode_chaos / _protect_jeep / _boss_teddy.
+static RE_TR2_BYREF_MEMBER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bget_tr2\s*\(\s*[^,()]+,\s*(TR_flFraction|TR_vecEndPos|TR_vecPlaneNormal|TR_flPlaneDist)\s*\)").unwrap()
+});
 static RE_PRAGMA_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#pragma\s+dynamic").unwrap());
 static RE_GLOBAL_NEW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^new\s+(.+)$").unwrap());
 static RE_DECL_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|,)\s*(?:const\s+)?(?:\w+:)?([A-Za-z_]\w*)").unwrap());
@@ -1130,6 +1139,12 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             && let Some(f) = enclosing_function_name(lines, i, &function_names)
             && RE_ENGINE_CALLBACK_FN.is_match(&f) {
             issues.push(iss(lineno, format!("remove_entity inside the engine callback '{}' frees an edict the engine still dereferences after the callback returns - mark FL_KILLME and let the engine remove it at the end of the frame", f), "remove_entity_in_callback", false));
+        }
+
+        // Float/vector TraceResult members REQUIRE the byref 3rd argument.
+        if config.enabled("tr2_missing_byref") && let Some(caps) = RE_TR2_BYREF_MEMBER.captures(san) {
+            let member = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            issues.push(iss(lineno, format!("get_tr2(..., {}) called without the byref 3rd argument - fakemeta reads params[3] unconditionally (unlike set_tr2, which validates the count), so it takes garbage past the parameter array as an AMX address and writes to it (segfault in get_tr2); pass a Float: variable: new Float:v; get_tr2(h, {}, v)", member, member), "tr2_missing_byref", true));
         }
 
         if config.enabled("get_cvar_hotpath") && let Some(m) = RE_GET_CVAR.find(san)
@@ -2365,6 +2380,21 @@ mod tests {
         assert!(r.contains(&"remove_entity_in_callback"));
         let ok = lint_str("rmcb2", "public fw_RocketThink(ent) {\n\tset_pev(ent, pev_flags, pev(ent, pev_flags) | FL_KILLME);\n}\n");
         assert!(!ok.contains(&"remove_entity_in_callback"));
+    }
+
+    // Caso real: zp50_gamemode_chaos:216 derrubou o servidor com SIGSEGV em
+    // fakemeta!get_tr2+228 por chamar TR_flFraction com 2 argumentos.
+    #[test]
+    fn tr2_missing_byref_flagged() {
+        let r = lint_str("tr2a", "public f() {\n\tif (get_tr2(0, TR_flFraction) < 1.0) {}\n}\n");
+        assert!(r.contains(&"tr2_missing_byref"));
+        let r2 = lint_str("tr2b", "public f() {\n\tnew Float:o[3];\n\tget_tr2(trace, TR_vecEndPos);\n}\n");
+        assert!(r2.contains(&"tr2_missing_byref"));
+        // forma correta (3 argumentos) e membros inteiros nao sao marcados
+        let ok = lint_str("tr2c", "public f() {\n\tnew Float:frac;\n\tget_tr2(0, TR_flFraction, frac);\n\tif (frac < 1.0) {}\n}\n");
+        assert!(!ok.contains(&"tr2_missing_byref"));
+        let ok2 = lint_str("tr2d", "public f() {\n\tif (get_tr2(0, TR_StartSolid)) {}\n}\n");
+        assert!(!ok2.contains(&"tr2_missing_byref"));
     }
 
     // Caso real: zp50_objective_remover / zp50_buy_zones / zp50_gameplay_fixes
