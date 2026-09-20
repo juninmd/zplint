@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- New rule `velocity_overwrite_no_add` (warning): flags `set_pev(id, pev_velocity, var)` that
+  replaces the whole velocity vector instead of combining it with the player's current velocity.
+  Production incident: a knockback/speed-boost ability that overwrites `pev_velocity` outright
+  silently erases fall damage and jump/bhop momentum. Warning-level: a full overwrite is also the
+  correct idiom for launch pads/rocket-jump abilities, so it can't be proven a bug from source alone.
+- New rule `cmd_injection_read_argv` (warning): flags `client_cmd`/`engclient_cmd`/`server_cmd`
+  forwarding a raw `read_argv`/`read_args` buffer, which lets a caller chain `;` to inject
+  console commands. Warning-level because the caller is often an admin-gated command
+  (e.g. the bundled amxmodx `admincmd.sma`), not arbitrary player input.
+- New rule `zp_maxhealth_arg_order` (warning): flags `zp_class_zombie_get_max_health`/
+  `zp_class_human_get_max_health` called as `(classid, id)` with the args swapped. Both natives
+  are `(id, classid)` per zp50_class_zombie.inc/zp50_class_human.inc; the reversed call still
+  compiles (both are plain cells) but silently reads the wrong table row. 0 hits on both corpora
+  (14 real call sites already use the correct order) — a preventive rule for a documented
+  porting footgun, same family as `sql_fieldname_truthy`.
+- New rule `zp_menu_text_add_outside_select_pre` (warning): flags `zp_class_zombie_menu_text_add`/
+  `zp_class_human_menu_text_add`/`zp_items_menu_text_add` called outside their matching
+  `select_pre` forward (per each native's doc comment). Resolved one level deep like
+  `task_entity_not_validated` — a local helper called from the matching `select_pre` forward
+  doesn't trigger it. 0 hits on both corpora after that fix (4 initial hits in the real corpus
+  were all this exact helper-function pattern, i.e. false positives caught before shipping).
+- New rule `zp_id_get_truthy` (warning): flags a bare `if (zp_items_get_id(...))` /
+  `zp_class_zombie_get_id`/`zp_class_human_get_id`/`zp_gamemodes_get_id` check (direct or via a
+  variable assigned earlier in the same function). All four natives return their `ZP_INVALID_*`
+  constant (confirmed `-1` in each `*_const.inc`) on failure, which is truthy in Pawn, while a
+  valid id `0` is falsy — same inverted-truthiness trap as `func_id_truthy`/`sql_fieldname_truthy`.
+  0 hits on both corpora (89 real call sites already assign-then-compare with `!= -1`).
+
 ### Fixed
 - `compile` now writes the **public-variable table**. `public` globals (and `@`-prefixed ones)
   were compiled with storage but never exported, so AMX Mod X could not bind `MaxClients`,

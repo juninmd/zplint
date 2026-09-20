@@ -451,6 +451,25 @@ zp50_extra_headcrab / zp50_class_overlord.
 Sources: https://github.com/dreamstalker/rehlds/issues/633 ·
 https://www.amxmodx.org/api/amxmodx/precache_sound · https://forums.alliedmods.net/showthread.php?t=343221
 
+### 4.1b `set_pev(id, pev_velocity, ...)` overwrite `[rule: velocity_overwrite_no_add]`
+`pev_velocity` is the player's whole velocity vector; `set_pev` (fakemeta) replaces it outright,
+it does not add to it. A knockback/dash/speed-boost ability that writes a fresh vector without
+first reading the existing `pev_velocity` silently erases fall damage and jump/bhop momentum —
+production incident: characters stuck to the ground or lost bhop chains mid-air after using the
+ability. Fix: `pev(id, pev_velocity, v)` first and add the boost (`v[i] += ...`, `xs_vec_add`),
+or use `velocity_by_aim`.
+Sources: https://www.amxmodx.org/api/amxmodx/set_pev · https://www.amxmodx.org/api/amxmodx/pev
+
+### 4.1c Command injection via `client_cmd`/`server_cmd` `[rule: cmd_injection_read_argv]`
+`read_argv`/`read_args` copy the raw client-supplied command line. Forwarding that buffer
+straight into `client_cmd`, `engclient_cmd`, or `server_cmd` re-executes it as a console command
+line: a player can chain `;` (or another command) into the argument and have it run with server
+or client privilege — the AMXX `client_cmd` reference explicitly warns against passing
+unsanitized input to it. Fix: validate/allowlist the argument, or build the executed command with
+`format()`/a literal instead of forwarding the raw client text.
+Sources: https://www.amxmodx.org/api/amxmodx/client_cmd ·
+https://www.amxmodx.org/api/amxmodx/read_argv
+
 ### 4.2 Edict pool exhaustion `[rule: entity_leak]`
 Fixed pool (~900 default, 2048 max). create_entity per event/kill/frame without a
 remove_entity path → accumulates until fatal "ED_Alloc: no free edicts".
@@ -636,19 +655,35 @@ Sources: zp50_items.sma · zp50_item_infection_bomb.sma · zp50_items_const.inc
 
 ### 6.6 Other zp50 contracts (documented, lower priority)
 - zp_fw_core_last_zombie also fires for the FIRST zombie (include doc) — last-zombie buffs
-  need zp_core_is_first_zombie/zombie_count checks.
+  need zp_core_is_first_zombie/zombie_count checks. **Evaluated, not implemented:** the real
+  corpus's own last-zombie handlers never call `zp_core_is_first_zombie` — they guard with
+  their own round-state flags instead (`zp50_infection_narrator.sma`/`zp50_operator_voice.sma`:
+  `if (!g_RoundStarted || !g_HadMultipleZombies || g_LastZombieDone) return`), which is
+  correct but invisible to a native-name search. A rule that only checks for the specific
+  native call would 100% false-positive on every correctly-guarded real handler; this needs
+  general "is there any early-return guard at all" detection, which regex can't tell apart
+  from "no guard, buffs applied to the first zombie too" without false negatives either way.
 - **[rule: zp_infect_pre_handled]** Unconditional PLUGIN_HANDLED in zp_fw_core_infect_pre
   (or `_cure_pre`) deadlocks round start (first zombie can never be made). "Unconditional"
   means *every* exit of the handler returns PLUGIN_HANDLED: a nested `if (...) return
   PLUGIN_HANDLED` guard with a PLUGIN_CONTINUE path is the correct, common shape.
-- zp_*_menu_text_add only meaningful inside the matching select_pre forward.
+- `[rule: zp_menu_text_add_outside_select_pre]` zp_*_menu_text_add only meaningful inside the
+  matching select_pre forward (`zp_class_zombie_menu_text_add`/`zp_fw_class_zombie_select_pre`,
+  `zp_class_human_menu_text_add`/`zp_fw_class_human_select_pre`,
+  `zp_items_menu_text_add`/`zp_fw_items_select_pre` — confirmed 1:1 by the doc comment "Use this
+  on the class/item select pre forward" on each native in zp50_class_zombie.inc/
+  zp50_class_human.inc/zp50_items.inc). Called from anywhere else it is a silent no-op: the menu
+  entry it appends to only exists while AMXX is building it during that specific forward call.
 - Mixing ZP 4.3 API (`#include <zombieplague>`, zp_get_user_zombie, zp_register_extra_item)
   with zp50 includes → "missing natives" load failure without the compat addon. `[rule: zp43_mixing]`
 - Query natives (zp_*_get_id/get_count) in plugin_init → "Invalid Array Handle" from plugin
   load order (fixed class of bugs in ZP 5.0.6 changelog); use plugin_cfg or forwards.
   `[rule: zp50_get_in_init]`
-- zp_class_zombie_get_max_health(id, classid) takes PLAYER first — 4.3 porters pass classid
-  alone and hit "[ZP] Invalid Player".
+- `[rule: zp_maxhealth_arg_order]` zp_class_zombie_get_max_health(id, classid) and
+  zp_class_human_get_max_health(id, classid) take PLAYER first (confirmed in
+  zp50_class_zombie.inc/zp50_class_human.inc's `native` decls) — swapping to (classid, id)
+  still compiles (both are plain cells) but silently reads the wrong table row/"[ZP] Invalid
+  Player". Name-based heuristic: flags a call whose first argument's identifier contains "class".
 - Infecting the last human instead of killing him stalls round end (official infection bomb
   special-cases `zp_core_get_human_count() == 1` → Ham_Killed).
 Sources: zp50_core.inc · zp50_changelog.txt · zp50_item_infection_bomb.sma ·
@@ -706,6 +741,19 @@ https://wiki.alliedmods.net/Optimizing_Plugins_(AMX_Mod_X_Scripting)
   (`new qcolAuth = SQL_FieldNameToNum(...)`) rather than testing it bare, so 0 hits — a
   preventive rule for the one idiom that would actually be wrong, not a demonstrated bug source.
 Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/sqlx.inc
+
+- `[rule: zp_id_get_truthy]` same bug class again: `zp_items_get_id`/`zp_class_zombie_get_id`/
+  `zp_class_human_get_id`/`zp_gamemodes_get_id` return `ZP_INVALID_ITEM`/`ZP_INVALID_ZOMBIE_CLASS`/
+  `ZP_INVALID_HUMAN_CLASS`/`ZP_INVALID_GAME_MODE` on failure — all four `#define`d to `-1` in
+  their respective `*_const.inc` (confirmed by reading the const files directly), which is
+  **truthy** in Pawn, while the valid id `0` (the first registered item/class/mode) is falsy.
+  A bare `if (zp_items_get_id(name))` therefore misreads id `0` as failure and, worse, would
+  treat -1 (real failure) as success too — same shape as `func_id_truthy`, mirrored onto the
+  same assign-then-check-bare idiom. 0 hits on both corpora: all 89 real call sites in
+  `meus_plugins_organizados` assign the result to a variable first and none test it bare within
+  the same function — a preventive rule, not a demonstrated bug source.
+Sources: zp50_items_const.inc · zp50_class_zombie_const.inc · zp50_class_human_const.inc ·
+zp50_gamemodes_const.inc (all four bundled in the zplague-addons corpus)
 
 - `[rule: func_id_truthy]` amxmodx.inc's `get_func_id()`/`get_xvar_id()` return **-1 on
   failure**, but their docs explicitly state valid ids are `>=0` — id 0 is real and falsy, same

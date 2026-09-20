@@ -630,7 +630,7 @@ static WARNING_RULES: &[&str] = &[
     "callback_not_defined", "zp50_register_return", "zp50_get_in_init",
     "zp_select_pre_filter", "zp_select_pre_return", "zp43_mixing", "entity_leak",
     "client_command_handled", "client_connect_actions", "contain_truthy",
-    "strcmp_truthy", "sql_fieldname_truthy", "func_id_truthy", "format_injection", "string_assign", "hud_channel_range",
+    "strcmp_truthy", "sql_fieldname_truthy", "func_id_truthy", "zp_id_get_truthy", "format_injection", "string_assign", "hud_channel_range",
     "line_too_long",
     // contract/style smells, not crashes: a chat-eating say hook still runs, and the
     // per-frame model call is redundant work
@@ -638,6 +638,19 @@ static WARNING_RULES: &[&str] = &[
     // one cell past the buffer, but the canonical amxmodx plugins ship it too - report it as
     // a (auto-fixable) warning rather than failing CI on a decades-old idiom
     "sizeof_string_len", "mixed_return", "self_recursion",
+    // context-dependent: a full pev_velocity overwrite is the correct idiom for
+    // launch pads / knockback / rocket-jump abilities that always want a fresh
+    // vector, so this can't be proven a bug from source alone - warn, don't fail CI
+    "velocity_overwrite_no_add",
+    // admin-only server_cmd(arg) (e.g. amxmodx-stock admincmd.sma) is gated by an
+    // ADMIN_CFG check before the callback runs, so the "player" in the message is
+    // often actually a trusted admin - heuristic, not a proven exploit
+    "cmd_injection_read_argv",
+    // name-based heuristic (no type info), same family as the other truthy/arg-order idioms
+    "zp_maxhealth_arg_order",
+    // the call still runs fine, it just has no visible effect outside the forward - a silent
+    // no-op, not a crash
+    "zp_menu_text_add_outside_select_pre",
 ];
 
 pub(crate) fn iss(lineno: usize, message: String, rule_id: &'static str, fixable: bool) -> LintIssue {

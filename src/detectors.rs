@@ -440,6 +440,36 @@ static RE_ENGINE_CALLBACK_FN: LazyLock<Regex> = LazyLock::new(|| {
 static RE_TR2_BYREF_MEMBER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bget_tr2\s*\(\s*[^,()]+,\s*(TR_flFraction|TR_vecEndPos|TR_vecPlaneNormal|TR_flPlaneDist)\s*\)").unwrap()
 });
+// A bare `set_pev(id, pev_velocity, <var>)` replaces the whole velocity vector.
+// Legitimate knockback/speed-boost code combines it with the player's current
+// velocity (xs_vec_add, a manual `[0]+=`, or a prior `pev(id, pev_velocity, ...)`
+// read into the same var); a plain overwrite silently erases fall/jump momentum.
+static RE_SET_VELOCITY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bset_pev\s*\(\s*([A-Za-z_]\w*)\s*,\s*pev_velocity\s*,\s*([A-Za-z_]\w*)\s*\)").unwrap()
+});
+// read_argv/read_args copy raw client-supplied command text. Handing that buffer
+// straight to client_cmd/engclient_cmd/server_cmd re-executes it as a console
+// command line, so a player can chain `;` to inject arbitrary commands (the
+// AMXX client_cmd docs call this out explicitly - never forward unsanitized
+// input to it).
+static RE_READ_ARGV_BUF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bread_arg(?:v|s)\s*\(\s*(?:\d+\s*,\s*)?([A-Za-z_]\w*)\s*,").unwrap()
+});
+static RE_CMD_EXEC_VAR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(client_cmd|engclient_cmd|server_cmd)\s*\(\s*(?:[^,()]+,\s*)?([A-Za-z_]\w*)\s*\)").unwrap()
+});
+// zp50_class_zombie.inc/zp50_class_human.inc: native zp_class_(zombie|human)_get_max_health(id,
+// classid) - PLAYER index first, class id second. A call with the class-looking identifier
+// first is the classic reversed-argument bug.
+static RE_ZP_MAXHEALTH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(zp_class_(?:zombie|human)_get_max_health)\s*\(\s*(\w*class\w*)\s*,\s*(\w+)\s*\)").unwrap()
+});
+// zp50_class_zombie.inc/zp50_class_human.inc/zp50_items.inc doc comments: "Use this on the
+// class/item select pre forward" - menu_text_add natives only affect the menu entry AMXX is
+// currently building, which only exists while the matching select_pre forward is executing.
+static RE_ZP_MENU_TEXT_ADD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(zp_class_zombie_menu_text_add|zp_class_human_menu_text_add|zp_items_menu_text_add)\s*\(").unwrap()
+});
 static RE_PRAGMA_DYNAMIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#pragma\s+dynamic").unwrap());
 static RE_GLOBAL_NEW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^new\s+(.+)$").unwrap());
 static RE_DECL_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|,)\s*(?:const\s+)?(?:\w+:)?([A-Za-z_]\w*)").unwrap());
@@ -462,6 +492,16 @@ static RE_FUNCID_COND: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_FUNCID_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b([A-Za-z_]\w*)\s*=\s*(?:get_func_id|get_xvar_id)\s*\(").unwrap()
+});
+// zp50_items_const.inc/zp50_class_zombie_const.inc/zp50_class_human_const.inc/
+// zp50_gamemodes_const.inc: ZP_INVALID_ITEM/ZP_INVALID_ZOMBIE_CLASS/ZP_INVALID_HUMAN_CLASS/
+// ZP_INVALID_GAME_MODE are all `-1` (truthy in Pawn), while id 0 is a valid, falsy result -
+// same inverted-truthiness trap as get_func_id/get_xvar_id above.
+static RE_ZP_ID_COND: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:if|while)\s*\(\s*!?\s*zp_(?:items|class_zombie|class_human|gamemodes)_get_id\s*\(").unwrap()
+});
+static RE_ZP_ID_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Za-z_]\w*)\s*=\s*zp_(?:items|class_zombie|class_human|gamemodes)_get_id\s*\(").unwrap()
 });
 static RE_CMP_OP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[=!<>]=|[<>]").unwrap());
 static RE_ZP_REG_STMT: LazyLock<Regex> = LazyLock::new(|| {
@@ -951,6 +991,23 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             }
         }
 
+        if config.enabled("zp_id_get_truthy") && let Some(m) = RE_ZP_ID_COND.find(san) {
+            let rest = &san[m.end()..];
+            let close = rest.find(')').map(|p| &rest[p..]).unwrap_or("");
+            if !RE_CMP_OP.is_match(close) {
+                issues.push(iss(lineno, "zp_*_get_id() returns ZP_INVALID_* (-1) on failure, but id 0 is a valid (falsy) result; bare 'if (zp_*_get_id(..))' misreads id 0 as failure - compare with != -1 (or the matching ZP_INVALID_* constant)".into(), "zp_id_get_truthy", false));
+            }
+        }
+
+        if config.enabled("zp_id_get_truthy") && let Some(caps) = RE_ZP_ID_ASSIGN.captures(san) {
+            let var = caps.get(1).unwrap().as_str();
+            let body_sq = squash(&enclosing_body(lines, i));
+            if body_sq.contains(&format!("if({})", var)) || body_sq.contains(&format!("if(!{})", var))
+                || body_sq.contains(&format!("while({})", var)) || body_sq.contains(&format!("while(!{})", var)) {
+                issues.push(iss(lineno, format!("'{}' holds a zp_*_get_id() result (ZP_INVALID_* is -1 on failure, but id 0 is valid); a bare 'if ({})' in this function misreads id 0 as failure - compare with != -1 (or the matching ZP_INVALID_* constant)", var, var), "zp_id_get_truthy", false));
+            }
+        }
+
         if config.enabled("formatex_self") {
             for args in extract_call_args(line, "formatex") {
                 if args.len() >= 3 && RE_IDENT_ONLY.is_match(args[0].trim()) {
@@ -1147,6 +1204,49 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             issues.push(iss(lineno, format!("get_tr2(..., {}) called without the byref 3rd argument - fakemeta reads params[3] unconditionally (unlike set_tr2, which validates the count), so it takes garbage past the parameter array as an AMX address and writes to it (segfault in get_tr2); pass a Float: variable: new Float:v; get_tr2(h, {}, v)", member, member), "tr2_missing_byref", true));
         }
 
+        // Custom knockback/speed abilities that overwrite pev_velocity outright wipe
+        // whatever fall/jump momentum the player already had (production incident:
+        // characters would stick to the ground or lose bhop chains mid-air).
+        if config.enabled("velocity_overwrite_no_add") && let Some(caps) = RE_SET_VELOCITY.captures(san) {
+            let id = caps.get(1).unwrap().as_str();
+            let var = caps.get(2).unwrap().as_str();
+            let body_sq = squash(&enclosing_body(lines, i)).replace("set_pev(", "");
+            let combines_existing = body_sq.contains(&format!("pev({},pev_velocity,{}", id, var))
+                || body_sq.contains(&format!("pev({},pev_velocity", id)) && (
+                    body_sq.contains(&format!("{}[0]+=", var)) || body_sq.contains(&format!("{}[1]+=", var))
+                    || body_sq.contains(&format!("{}[2]+=", var)) || body_sq.contains("xs_vec_add")
+                    || body_sq.contains(&format!("vector_add({}", var))
+                );
+            if !combines_existing {
+                issues.push(iss(lineno, format!("set_pev({}, pev_velocity, {}) overwrites the whole velocity vector instead of adding to it - this silently erases fall damage/jump momentum; read the current pev_velocity into {} first and add the boost, or use velocity_by_aim/xs_vec_add", id, var, var), "velocity_overwrite_no_add", false));
+            }
+        }
+
+        // zp_class_zombie_get_max_health(id, classid) - reversed args (classid, id) compile
+        // fine (both are cell/int) but read the wrong table row silently.
+        if config.enabled("zp_maxhealth_arg_order") && let Some(caps) = RE_ZP_MAXHEALTH.captures(san) {
+            let native = caps.get(1).unwrap().as_str();
+            let first = caps.get(2).unwrap().as_str();
+            let second = caps.get(3).unwrap().as_str();
+            if !second.to_lowercase().contains("class") {
+                issues.push(iss(lineno, format!("{}({}, {}) - the native is (id, classid), player index first; \"{}\" looks like the class id and is in the first slot", native, first, second, first), "zp_maxhealth_arg_order", false));
+            }
+        }
+
+        // Client command text handed straight to client_cmd/engclient_cmd/server_cmd
+        // lets a player inject arbitrary console commands via `;` (AMXX docs: never
+        // forward unsanitized input to these natives).
+        if config.enabled("cmd_injection_read_argv") && let Some(caps) = RE_CMD_EXEC_VAR.captures(san) {
+            let cmd_fn = caps.get(1).unwrap().as_str();
+            let var = caps.get(2).unwrap().as_str();
+            let body_sq = squash(&enclosing_body(lines, i));
+            let fed_by_read_argv = RE_READ_ARGV_BUF.captures_iter(&body_sq)
+                .any(|c| c.get(1).unwrap().as_str() == var);
+            if fed_by_read_argv {
+                issues.push(iss(lineno, format!("{}(..., {}) forwards a read_argv/read_args buffer straight to a command native - a player can chain \";\" to inject arbitrary console commands; validate/allowlist the value or build the call with format() instead of passing the raw client text", cmd_fn, var), "cmd_injection_read_argv", false));
+            }
+        }
+
         if config.enabled("get_cvar_hotpath") && let Some(m) = RE_GET_CVAR.find(san)
             && outside_string(line, m.start(), esc) {
             let f = enclosing_function_name(lines, i, &function_names);
@@ -1208,6 +1308,28 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                 || body_sq.contains(&format!("if({}&&", attacker));
             if uses && !guarded {
                 issues.push(iss(lineno, format!("zp_fw_core_infect/cure '{}' is 0 for gamemode/admin/console infections (documented) - guard before player natives or it errors every round start", attacker), "zp_fw_attacker_guard", false));
+            }
+        }
+
+        if config.enabled("zp_menu_text_add_outside_select_pre") && let Some(caps) = RE_ZP_MENU_TEXT_ADD.captures(san) {
+            let native = caps.get(1).unwrap().as_str();
+            let expected_fw = match native {
+                "zp_class_zombie_menu_text_add" => "zp_fw_class_zombie_select_pre",
+                "zp_class_human_menu_text_add" => "zp_fw_class_human_select_pre",
+                _ => "zp_fw_items_select_pre",
+            };
+            let caller = enclosing_function_name(lines, i, &function_names);
+            // resolved one level deep: a local helper called from the matching select_pre
+            // forward (e.g. check_zombie_limit(id, classid) invoked from
+            // zp_fw_class_zombie_select_pre) counts as inside it, same idiom as
+            // task_entity_not_validated's local-helper resolution.
+            let in_expected_fw = caller.as_deref() == Some(expected_fw) || caller.is_some_and(|f| {
+                lines.iter().position(|l| l.contains(&format!("public {}(", expected_fw)))
+                    .map(|fw_line| squash(&enclosing_body(lines, fw_line)).contains(&format!("{}(", f)))
+                    .unwrap_or(false)
+            });
+            if !in_expected_fw {
+                issues.push(iss(lineno, format!("{}() only affects the menu entry AMXX is currently building, which exists only while {}() is running (doc: \"use this on the class/item select pre forward\") - called outside it, the text is silently dropped", native, expected_fw), "zp_menu_text_add_outside_select_pre", false));
             }
         }
 
@@ -2063,6 +2185,16 @@ mod tests {
     }
 
     #[test]
+    fn zp_id_get_truthy_rule() {
+        let r = lint_str("zid1", "public f(name[]) {\n\tif (zp_items_get_id(name)) return 1;\n\treturn 0;\n}\n");
+        assert!(r.contains(&"zp_id_get_truthy"));
+        let r2 = lint_str("zid2", "public f(name[]) {\n\tnew id = zp_class_zombie_get_id(name);\n\tif (id) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(r2.contains(&"zp_id_get_truthy"));
+        let ok = lint_str("zidok", "public f(name[]) {\n\tnew id = zp_gamemodes_get_id(name);\n\tif (id != -1) {\n\t\treturn 1;\n\t}\n\treturn 0;\n}\n");
+        assert!(!ok.contains(&"zp_id_get_truthy"));
+    }
+
+    #[test]
     fn formatex_self_rule() {
         let r = lint_str("fmx", "public f() {\n\tnew buf[64];\n\tformatex(buf, charsmax(buf), \"prefix %s\", buf);\n}\n");
         assert!(r.contains(&"formatex_self"));
@@ -2406,6 +2538,47 @@ mod tests {
         assert!(r.contains(&"remove_entity_in_callback"));
         let ok = lint_str("rmspawn2", "public fw_Spawn(entity) {\n\tset_pev(entity, pev_flags, pev(entity, pev_flags) | FL_KILLME);\n}\n");
         assert!(!ok.contains(&"remove_entity_in_callback"));
+    }
+
+    // Caso real: habilidade custom de dash/knockback sobrescrevia pev_velocity
+    // inteiro, apagando queda/impulso de pulo em vez de somar ao vetor atual.
+    #[test]
+    fn velocity_overwrite_no_add_flagged() {
+        let r = lint_str("vel1", "public dash(id) {\n\tnew Float:v[3];\n\tv[0] = 500.0;\n\tset_pev(id, pev_velocity, v);\n}\n");
+        assert!(r.contains(&"velocity_overwrite_no_add"));
+        let ok = lint_str("vel2", "public dash(id) {\n\tnew Float:v[3];\n\tpev(id, pev_velocity, v);\n\tv[0] += 500.0;\n\tset_pev(id, pev_velocity, v);\n}\n");
+        assert!(!ok.contains(&"velocity_overwrite_no_add"));
+    }
+
+    #[test]
+    fn zp_menu_text_add_outside_select_pre_flagged() {
+        let r = lint_str("zpmtx1", "public zp_fw_items_select(id, itemid) {\n\tzp_items_menu_text_add(\"(buffed)\");\n}\n");
+        assert!(r.contains(&"zp_menu_text_add_outside_select_pre"));
+        let ok = lint_str("zpmtx2", "public zp_fw_items_select_pre(id, itemid, ignorecost) {\n\tzp_items_menu_text_add(\"(buffed)\");\n\treturn ZP_ITEM_AVAILABLE;\n}\n");
+        assert!(!ok.contains(&"zp_menu_text_add_outside_select_pre"));
+        // one level deep: local helper invoked from the matching select_pre forward is ok
+        let ok2 = lint_str("zpmtx3", "check_limit(id, classid) {\n\tzp_class_zombie_menu_text_add(\"[full]\");\n\treturn ZP_CLASS_NOT_AVAILABLE;\n}\npublic zp_fw_class_zombie_select_pre(id, classid) {\n\treturn check_limit(id, classid);\n}\n");
+        assert!(!ok2.contains(&"zp_menu_text_add_outside_select_pre"));
+    }
+
+    #[test]
+    fn zp_maxhealth_arg_order_flagged() {
+        let r = lint_str("zpmh1", "public f(id, classid) {\n\tnew hp = zp_class_zombie_get_max_health(classid, id);\n}\n");
+        assert!(r.contains(&"zp_maxhealth_arg_order"));
+        let ok = lint_str("zpmh2", "public f(id, classid) {\n\tnew hp = zp_class_zombie_get_max_health(id, classid);\n}\n");
+        assert!(!ok.contains(&"zp_maxhealth_arg_order"));
+        let r2 = lint_str("zpmh3", "public f(id, classid) {\n\tnew hp = zp_class_human_get_max_health(classid, id);\n}\n");
+        assert!(r2.contains(&"zp_maxhealth_arg_order"));
+    }
+
+    #[test]
+    fn cmd_injection_read_argv_flagged() {
+        let r = lint_str("inj1", "public cmd_say(id) {\n\tnew arg[64];\n\tread_argv(1, arg, 63);\n\tclient_cmd(id, arg);\n}\n");
+        assert!(r.contains(&"cmd_injection_read_argv"));
+        let r2 = lint_str("inj2", "public cmd_say(id) {\n\tnew arg[64];\n\tread_args(arg, 63);\n\tserver_cmd(arg);\n}\n");
+        assert!(r2.contains(&"cmd_injection_read_argv"));
+        let ok = lint_str("inj3", "public cmd_say(id) {\n\tnew arg[64];\n\tread_argv(1, arg, 63);\n\tclient_print(id, print_chat, \"%s\", arg);\n}\n");
+        assert!(!ok.contains(&"cmd_injection_read_argv"));
     }
 
     #[test]
