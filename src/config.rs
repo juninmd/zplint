@@ -62,6 +62,10 @@ pub struct RulesConfig {
     #[serde(default = "true_val")] pub zp_infect_lasthuman_survivor: bool,
     /// Rule ids from detectors.rs to turn off (they are on by default).
     #[serde(default)] pub disable: Vec<String>,
+    /// Runtime allow-list from `--only`. Empty means "all rules".
+    #[serde(default)] pub only: Vec<String>,
+    /// Runtime deny-list from `--skip`. Takes precedence over `only`.
+    #[serde(default)] pub skip: Vec<String>,
     /// Route `ast_lint::MIGRATED_RULES` through the zpc parser when the file
     /// parses cleanly. Files that do not parse always fall back to the regex
     /// engine, so turning this off only costs precision, never coverage.
@@ -70,7 +74,19 @@ pub struct RulesConfig {
 
 impl RulesConfig {
     pub fn enabled(&self, rule_id: &str) -> bool {
-        !self.disable.iter().any(|d| d == rule_id)
+        self.selected(rule_id) && !self.disable.iter().any(|d| d == rule_id)
+    }
+
+    /// `--only` / `--skip` selection, independent of the config-file `disable`
+    /// list. Kept separate so `enabled()` can be used by detectors that also
+    /// have a legacy boolean field, while the final pass in `lint_file` filters
+    /// every rule id through both.
+    pub fn selected(&self, rule_id: &str) -> bool {
+        let skip = self.skip.iter().any(|s| selector_matches(s, rule_id));
+        if skip {
+            return false;
+        }
+        self.only.is_empty() || self.only.iter().any(|o| selector_matches(o, rule_id))
     }
 }
 
@@ -118,9 +134,21 @@ impl Default for RulesConfig {
             fopen_close: true,
             zp_infect_lasthuman_survivor: true,
             disable: Vec::new(),
+            only: Vec::new(),
+            skip: Vec::new(),
             ast: true,
         }
     }
+}
+
+/// `--only`/`--skip` selector: exact id, `all`, a category (`correctness`,
+/// `suspicious`, `performance`, `security`, `style`) or `recommended`.
+fn selector_matches(sel: &str, rule_id: &str) -> bool {
+    sel == "all"
+        || sel == rule_id
+        || (sel == "recommended" && crate::rule_meta::recommended(rule_id))
+        || crate::rule_meta::Category::from_str(sel)
+            .is_some_and(|c| c == crate::rule_meta::category(rule_id))
 }
 
 fn default_paths() -> Vec<String> { vec!["meus_plugins_organizados".to_string()] }

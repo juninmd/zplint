@@ -102,6 +102,10 @@ pub fn lint(path: &Path, src: &str, config: &RulesConfig) -> Option<Vec<LintIssu
         }
     }
 
+    // Symbol/tag/flow rules that need the whole tree: unused symbols (203/204),
+    // read-before-write (210) and the bitwise-in-condition smell (212).
+    crate::sema_lint::run(&mut cx, &program);
+
     Some(cx.out)
 }
 
@@ -173,12 +177,12 @@ fn blank_includes(src: &str) -> String {
     out
 }
 
-struct Ctx<'a> {
-    index: LineIndex,
-    map: &'a LineMap,
-    path: &'a Path,
-    config: &'a RulesConfig,
-    out: Vec<LintIssue>,
+pub(crate) struct Ctx<'a> {
+    pub(crate) index: LineIndex,
+    pub(crate) map: &'a LineMap,
+    pub(crate) path: &'a Path,
+    pub(crate) config: &'a RulesConfig,
+    pub(crate) out: Vec<LintIssue>,
 }
 
 impl Ctx<'_> {
@@ -194,13 +198,13 @@ impl Ctx<'_> {
         }
     }
 
-    fn report(&mut self, offset: u32, message: &str, rule_id: &'static str) {
+    pub(crate) fn report(&mut self, offset: u32, message: &str, rule_id: &'static str) {
         if let Some(lineno) = self.line_of(offset) {
             self.out.push(iss(lineno, message.to_string(), rule_id, false));
         }
     }
 
-    fn enabled(&self, rule_id: &str) -> bool {
+    pub(crate) fn enabled(&self, rule_id: &str) -> bool {
         self.config.enabled(rule_id)
     }
 

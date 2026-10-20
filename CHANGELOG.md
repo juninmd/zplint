@@ -8,6 +8,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **P0/P1 Biome parity**: AST semantic pass (`src/sema_lint.rs`) with
+  `unused_symbol` (203), `write_only_symbol` (204), `use_before_init` (210) and
+  `unintended_bitwise` (212); rule categories + `--only=correctness` /
+  `--skip=style` / `recommended`; `zplint rules [--json]`; safe/unsafe fixes
+  (`zplint fix`, `zplint fix --unsafe-fixes`); `zplint ci` with
+  `--changed`/`--since`/`--staged`; `sql_injection`; path-aware
+  `resource_leak_on_return`; `get_players_flags`/`find_player_flags`;
+  `read_data_bounds`.
+- **Formatter (`zplint fmt`)**: brace-depth indentation including braceless
+  control bodies, trailing-whitespace cleanup, blank-line collapsing and a
+  contiguous leading `#include` sort with `<amxmodx>` first. `--check` and
+  `--write`, idempotent, conservative around comments/continuations.
+- **LSP (`zplint lsp`)**: JSON-RPC over stdio with full-document sync,
+  diagnostics, hover for AMXX natives/constants, `zplint-ignore` quick fixes and
+  document formatting.
+- **Reporters**: `--reporter default|json|github|sarif|junit` (the old `--json`
+  remains an alias for `--reporter=json`).
+
+### Added
+- **Biome-parity workflow**: comment suppressions (`// zplint-ignore`,
+  `-next-line`, `-file`, optional rule list, `-- reason`), `--only`/`--skip`
+  rule filtering, `--error-on-warnings`, `--max-diagnostics`, a `--json`
+  reporter and `zplint explain <rule>` (reads the curated `docs/KNOWLEDGE.md`
+  entry plus severity). See `docs/BIOME_PARITY.md` for the research, gap matrix
+  and prioritized backlog.
+- 5 new detectors: `menu_handler_handled` (newmenus.inc: a `menu_create` handler
+  must return `PLUGIN_HANDLED`), `get_user_msgid_in_precache` (amxmodx.inc: id 0
+  on the first server start), `duplicate_include`, `unknown_pragma` (amxxpc
+  warning 207) and `sizeof_scalar` (warning 223).
+- `callback_not_defined` and `registered_callback_public` now cover
+  `register_event`, `register_forward`, `RegisterHam*`, `register_think`,
+  `register_touch`, `register_impulse` and `register_logevent`; registrations in
+  commented-out code are ignored.
+- `handle_leak` and `handle_use_after_destroy` now cover 24 constructor/
+  destructor pairs from the bundled includes (array, trie, stack, datapack, tr2,
+  kvd, forward, SQL tuple/connection, DBI, nvault, regex, socket, SMC/INI parser,
+  JSON). Globals remain exempt; locals are checked.
+- Cross-mod include aliases for `api_missing_include`: the same native is
+  declared by `csstats`/`dodstats`/`tfcstats`/`tsstats` and
+  `csx`/`dodx`/`tfcx`/`tsx`. This removes 71 false errors on the official
+  DOD/TFC/TS plugins.
+
+### Added
 - New rule `velocity_overwrite_no_add` (warning): flags `set_pev(id, pev_velocity, var)` that
   replaces the whole velocity vector instead of combining it with the player's current velocity.
   Production incident: a knockback/speed-boost ability that overwrites `pev_velocity` outright

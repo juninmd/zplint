@@ -74,7 +74,12 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         },
         Err(_) => return vec![],
     };
+    lint_source(filepath, &raw, config)
+}
 
+/// Lint an in-memory source. The LSP path uses this so unsaved editor buffers
+/// are linted without touching disk.
+pub fn lint_source(filepath: &std::path::Path, raw: &str, config: &RulesConfig) -> Vec<LintIssue> {
     // AST path first: if the file parses through the zpc front-end, the migrated
     // rules are answered from the parse tree and suppressed in the regex pass
     // below. A file that does not parse silently keeps the regex behaviour, so a
@@ -82,7 +87,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
     let mut ast_issues = Vec::new();
     let ast_config;
     let config = if config.ast
-        && let Some(found) = crate::ast_lint::lint(filepath, &raw, config)
+        && let Some(found) = crate::ast_lint::lint(filepath, raw, config)
     {
         ast_issues = found;
         let mut narrowed = config.clone();
@@ -95,8 +100,17 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         config
     };
 
-    let raw_clean = strip_block_comments(&raw);
+    let raw_clean = strip_block_comments(raw);
     let lines_clean: Vec<&str> = raw_clean.split('\n').collect();
+    // Registration callbacks live in quoted strings: strip `//` comments but
+    // keep literals, so a commented-out `register_clcmd("x", "cb")` example is
+    // not treated as a real registration.
+    let esc = if raw_clean.contains(r"#pragma ctrlchar '\'") { '\\' } else { '^' };
+    let raw_nc = lines_clean
+        .iter()
+        .map(|l| strip_line_comment(l, esc))
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut issues = ast_issues;
     // Track message_begin nesting for rule: nested_message
     let mut _msg_begin_lineno: usize = 0;
@@ -207,7 +221,16 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
             && let Some(var) = RE_GAMEMODE.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
             let body = squash(&enclosing_body(&lines_clean, i));
             if body.contains(&format!("if({})", var)) && !body.contains(&format!("if({}>0)", var)) {
-                issues.push(iss(lineno, format!("if ({}) should be if ({} > 0) - gamemode can return -2 (ZP_NO_GAME_MODE)", var, var), "zp_gamemode_if", true));
+                // Report the `if`, not the declaration: the fixer rewrites this
+                // line, and the user should see the line that changes.
+                let if_lineno = lines_clean
+                    .iter()
+                    .enumerate()
+                    .skip(i)
+                    .find(|(_, l)| squash(l).contains(&format!("if({})", var)))
+                    .map(|(j, _)| j + 1)
+                    .unwrap_or(lineno);
+                issues.push(iss(if_lineno, format!("if ({}) should be if ({} > 0) - gamemode can return -2 (ZP_NO_GAME_MODE)", var, var), "zp_gamemode_if", true));
             }
         }
 
@@ -216,7 +239,14 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
                 if let Some(var) = re_fn.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
                     let body = squash(&enclosing_body(&lines_clean, i));
                     if body.contains(&format!("if({})", var)) && !body.contains(&format!("if({}>0)", var)) {
-                        issues.push(iss(lineno, format!("if ({}) should be if ({} > 0) - class ID can return -1 (ZP_NO_CLASS)", var, var), "zp_class_if", true));
+                        let if_lineno = lines_clean
+                            .iter()
+                            .enumerate()
+                            .skip(i)
+                            .find(|(_, l)| squash(l).contains(&format!("if({})", var)))
+                            .map(|(j, _)| j + 1)
+                            .unwrap_or(lineno);
+                        issues.push(iss(if_lineno, format!("if ({}) should be if ({} > 0) - class ID can return -1 (ZP_NO_CLASS)", var, var), "zp_class_if", true));
                     }
                 }
             }
@@ -473,37 +503,42 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
     }
 
     if config.registered_callback_public {
-        let publics = find_publics(&raw_clean);
-        let nonpublics = find_nonpublics(&raw_clean, &publics);
-        for re in [&*RE_CALLBACK_ARG1, &*RE_CALLBACK_ARG2] {
-            for caps in re.captures_iter(&raw_clean) {
-                let cb = caps.get(2).unwrap().as_str().to_string();
-                if !nonpublics.contains(&cb) {
-                    continue;
-                }
-
-                let native = caps.get(1).unwrap().as_str();
-                let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
-                issues.push(iss(
-                    lineno,
-                    format!("{} callback \"{}\" is a non-public function (AMXX requires registered callbacks to be public)", native, cb),
-                    "registered_callback_public",
-                    false,
-                ));
+        let publics = find_publics(&raw_nc);
+        let nonpublics = find_nonpublics(&raw_nc, &publics);
+        let more = crate::detectors::RE_CALLBACK_MORE
+            .iter()
+            .flat_map(|re| re.captures_iter(&raw_nc));
+        for caps in RE_CALLBACK_ARG1
+            .captures_iter(&raw_nc)
+            .chain(RE_CALLBACK_ARG2.captures_iter(&raw_nc))
+            .chain(more)
+        {
+            let cb = caps.get(2).unwrap().as_str().to_string();
+            if !nonpublics.contains(&cb) {
+                continue;
             }
+
+            let native = caps.get(1).unwrap().as_str();
+            let lineno = raw_nc[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+            issues.push(iss(
+                lineno,
+                format!("{} callback \"{}\" is a non-public function (AMXX requires registered callbacks to be public)", native, cb),
+                "registered_callback_public",
+                false,
+            ));
         }
     }
 
     if config.menu_handler_destroy {
-        let publics = find_publics(&raw_clean);
+        let publics = find_publics(&raw_nc);
         let mut function_names: Vec<String> = publics.iter().map(|name| name.to_string()).collect();
-        function_names.extend(find_nonpublics(&raw_clean, &publics));
-        for caps in RE_CALLBACK_ARG2.captures_iter(&raw_clean) {
+        function_names.extend(find_nonpublics(&raw_nc, &publics));
+        for caps in RE_CALLBACK_ARG2.captures_iter(&raw_nc) {
             if caps.get(1).unwrap().as_str() != "menu_create" {
                 continue;
             }
 
-            let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+            let lineno = raw_nc[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
             if enclosing_function_name(&lines_clean, lineno - 1, &function_names).as_deref() == Some("plugin_init") {
                 continue;
             }
@@ -541,13 +576,13 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         let mut function_names: Vec<String> = publics.iter().map(|name| name.to_string()).collect();
         function_names.extend(find_nonpublics(&raw_clean, &publics));
         let message_cbs: Vec<String> = RE_CALLBACK_ARG2
-            .captures_iter(&raw_clean)
+            .captures_iter(&raw_nc)
             .filter(|caps| caps.get(1).unwrap().as_str() == "register_message")
             .map(|caps| caps.get(2).unwrap().as_str().to_string())
             .collect();
         let mut flagged_lines: Vec<usize> = Vec::new();
-        for caps in RE_MSG_HOOK_ONLY.captures_iter(&raw_clean) {
-            let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+        for caps in RE_MSG_HOOK_ONLY.captures_iter(&raw_nc) {
+            let lineno = raw_nc[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
             if flagged_lines.contains(&lineno) {
                 continue;
             }
@@ -578,7 +613,95 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         }
     }
 
+    apply_suppressions(&raw_clean, &mut issues);
+    issues.retain(|i| config.selected(i.rule_id));
+    issues.sort_by_key(|i| i.lineno);
     issues
+}
+
+/// Comment suppressions, modeled on Biome's `biome-ignore` family:
+///
+/// ```pawn
+/// // zplint-ignore-next-line set_task_public -- this callback really is a stock helper
+/// set_task(1.0, "not_public")
+///
+/// client_print(0, print_chat, msg) // zplint-ignore format_injection
+/// ```
+///
+/// * `zplint-ignore` suppresses diagnostics on the same line (trailing comment).
+/// * `zplint-ignore-next-line` suppresses the next line that contains code.
+/// * `zplint-ignore-file` (also accepted as `zplint-ignore-all`) suppresses the
+///   whole file.
+/// * A rule list may follow the directive, separated by whitespace, commas or a
+///   colon. With no rule list every rule is suppressed.
+///
+/// Tokens are only treated as rule ids when they look like one (lowercase and
+/// containing `_`); everything after `--` or after a free-text word is a reason,
+/// so `-- because the API requires it` cannot accidentally name a rule.
+fn apply_suppressions(raw: &str, issues: &mut Vec<LintIssue>) {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut per_line: Vec<Vec<String>> = vec![Vec::new(); lines.len()];
+    let mut per_line_all: Vec<bool> = vec![false; lines.len()];
+    let mut file_wide: Vec<String> = Vec::new();
+    let mut file_all = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        let Some(comment_at) = line.find("//") else { continue };
+        let comment = &line[comment_at..];
+        let Some(pos) = comment.find("zplint-ignore") else { continue };
+        let rest = &comment[pos + "zplint-ignore".len()..];
+
+        let (kind, rest) = if let Some(r) = rest.strip_prefix("-next-line") {
+            ("next", r)
+        } else if let Some(r) = rest.strip_prefix("-file") {
+            ("file", r)
+        } else if let Some(r) = rest.strip_prefix("-all") {
+            ("file", r)
+        } else {
+            ("line", rest)
+        };
+
+        // The reason starts at `--`; a colon is just a separator for the rule list.
+        let list = rest.split("--").next().unwrap_or("").trim_start_matches(':').trim();
+        let rules: Vec<String> = list
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|t| {
+                t.len() >= 3
+                    && t.contains('_')
+                    && t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+            .map(str::to_string)
+            .collect();
+
+        let all = rules.is_empty();
+        match kind {
+            "file" => {
+                if all { file_all = true; } else { file_wide.extend(rules); }
+            }
+            "next" => {
+                if let Some(j) = (i + 1..lines.len()).find(|&j| {
+                    let t = lines[j].trim();
+                    !t.is_empty() && !t.starts_with("//") && !t.starts_with('*')
+                }) {
+                    if all { per_line_all[j] = true; } else { per_line[j].extend(rules); }
+                }
+            }
+            _ => {
+                if all { per_line_all[i] = true; } else { per_line[i].extend(rules); }
+            }
+        }
+    }
+
+    issues.retain(|issue| {
+        let idx = issue.lineno.saturating_sub(1);
+        let file_hit = file_all
+            || (!file_wide.is_empty() && file_wide.iter().any(|r| r == issue.rule_id));
+        let line_hit = per_line_all.get(idx).copied().unwrap_or(false)
+            || per_line
+                .get(idx)
+                .is_some_and(|list| list.iter().any(|r| r == issue.rule_id));
+        !file_hit && !line_hit
+    });
 }
 
 fn find_enclosing_fn(lines: &[&str], raw: &str, char_pos: usize) -> String {
@@ -651,11 +774,42 @@ static WARNING_RULES: &[&str] = &[
     // the call still runs fine, it just has no visible effect outside the forward - a silent
     // no-op, not a crash
     "zp_menu_text_add_outside_select_pre",
+    // contract/style smells added with the Biome-parity batch
+    "menu_handler_handled",
+    "get_user_msgid_in_precache",
+    "duplicate_include",
+    "unknown_pragma",
+    "sizeof_scalar",
+    // sema_lint.rs: compiler warnings 203/204/210/212
+    "unused_symbol",
+    "write_only_symbol",
+    "use_before_init",
+    "unintended_bitwise",
+    "sql_injection",
+    "resource_leak_on_return",
+    "get_players_flags",
+    "find_player_flags",
+    "read_data_bounds",
 ];
+
+/// True when `rule_id` is deliberately a warning (style/perf/contract smell)
+/// rather than a compile/crash error. Exposed for `zplint explain`.
+pub fn rule_is_warning(rule_id: &str) -> bool {
+    WARNING_RULES.contains(&rule_id)
+}
 
 pub(crate) fn iss(lineno: usize, message: String, rule_id: &'static str, fixable: bool) -> LintIssue {
     let severity = if WARNING_RULES.contains(&rule_id) { Severity::Warning } else { Severity::Error };
-    LintIssue { lineno, message, rule_id, severity, auto_fixable: fixable }
+    let fix = if !fixable {
+        FixSafety::None
+    } else if matches!(rule_id, "zp_gamemode_if" | "zp_class_if") {
+        // These rewrite `if (mode)` to `if (mode > 0)`: correct for ZP, but a
+        // semantic narrowing, so they are not applied without `--unsafe`.
+        FixSafety::Unsafe
+    } else {
+        FixSafety::Safe
+    };
+    LintIssue { lineno, message, rule_id, severity, fix }
 }
 
 /// Remove /* */ comments, preserving line structure. Unlike a plain regex this
@@ -1647,7 +1801,7 @@ public cmd_say(id) {
         let issues = lint_file(&path, &RulesConfig::default());
         let hits: Vec<_> = issues.iter().filter(|i| i.rule_id == "sizeof_string_len").collect();
         assert_eq!(hits.len(), 2);
-        assert!(hits.iter().all(|i| i.auto_fixable));
+        assert!(hits.iter().all(|i| i.fix.is_some()));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1870,6 +2024,49 @@ public Show_Menu_Next(id) {
 
         let issues = lint_file(&path, &RulesConfig::default());
         assert!(!issues.iter().any(|issue| issue.rule_id == "self_recursion"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn suppression_comments_same_next_and_file() {
+        let same = write_temp_sma("sup_same", "public f() {\n\tabort() // zplint-ignore abort_call\n}\n");
+        assert!(!lint_file(&same, &RulesConfig::default()).iter().any(|i| i.rule_id == "abort_call"));
+        std::fs::remove_file(same).unwrap();
+
+        let next = write_temp_sma("sup_next", "public f() {\n\t// zplint-ignore-next-line abort_call -- documented test hook\n\tabort()\n}\n");
+        assert!(!lint_file(&next, &RulesConfig::default()).iter().any(|i| i.rule_id == "abort_call"));
+        std::fs::remove_file(next).unwrap();
+
+        let file = write_temp_sma("sup_file", "// zplint-ignore-file abort_call\npublic f() {\n\tabort()\n}\n");
+        assert!(!lint_file(&file, &RulesConfig::default()).iter().any(|i| i.rule_id == "abort_call"));
+        std::fs::remove_file(file).unwrap();
+
+        // No rule list means "every rule".
+        let all = write_temp_sma("sup_all", "public f() {\n\tabort() // zplint-ignore\n}\n");
+        assert!(lint_file(&all, &RulesConfig::default()).is_empty());
+        std::fs::remove_file(all).unwrap();
+
+        let all_file = write_temp_sma("sup_all_file", "// zplint-ignore-file\npublic f() {\n\tabort()\n}\n");
+        assert!(lint_file(&all_file, &RulesConfig::default()).is_empty());
+        std::fs::remove_file(all_file).unwrap();
+
+        // A rule list is selective: other rules on the line still fire.
+        let selective = write_temp_sma("sup_sel", "public f() {\n\tnew x\n\tabort() // zplint-ignore abort_call\n}\n");
+        let issues = lint_file(&selective, &RulesConfig::default());
+        assert!(!issues.iter().any(|i| i.rule_id == "abort_call"));
+        std::fs::remove_file(selective).unwrap();
+    }
+
+    #[test]
+    fn only_and_skip_filter_every_rule() {
+        let path = write_temp_sma("only_skip", "public f() {\n\tabort()\n}\n");
+        let only = RulesConfig { only: vec!["abort_call".into()], ..Default::default() };
+        let issues = lint_file(&path, &only);
+        assert!(issues.iter().any(|i| i.rule_id == "abort_call"));
+        assert!(issues.iter().all(|i| i.rule_id == "abort_call"));
+
+        let skip = RulesConfig { skip: vec!["abort_call".into()], ..Default::default() };
+        assert!(!lint_file(&path, &skip).iter().any(|i| i.rule_id == "abort_call"));
         std::fs::remove_file(path).unwrap();
     }
 

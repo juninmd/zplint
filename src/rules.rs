@@ -6,13 +6,40 @@ pub enum Severity {
     Warning,
 }
 
+/// What `zplint fix` may do with a diagnostic, mirroring Biome's safe/unsafe
+/// split: safe fixes preserve semantics, unsafe fixes need review.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FixSafety {
+    None,
+    Safe,
+    Unsafe,
+}
+
+impl FixSafety {
+    pub fn is_some(self) -> bool {
+        self != FixSafety::None
+    }
+
+    pub fn is_safe(self) -> bool {
+        self == FixSafety::Safe
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FixSafety::None => "none",
+            FixSafety::Safe => "safe",
+            FixSafety::Unsafe => "unsafe",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LintIssue {
     pub lineno: usize,
     pub message: String,
     pub rule_id: &'static str,
     pub severity: Severity,
-    pub auto_fixable: bool,
+    pub fix: FixSafety,
 }
 
 pub static STOCK_SOUND_DIRS: &[&str] = &[
@@ -37,6 +64,42 @@ pub static DANGEROUS_FORWARDS: &[(&str, &str)] = &[
     ("fw_Killed", "victim"),
     ("Ham_Killed", "victim"),
 ];
+
+/// Remove a `//` line comment while keeping string and character literals
+/// intact. `esc` is the file's escape character (`^` by default, `\` after
+/// `#pragma ctrlchar`). Used by rules that must see quoted callback names but
+/// must not match registration calls that are commented out.
+pub fn strip_line_comment(line: &str, esc: char) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut in_str = false;
+    let mut in_char = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            if c == esc {
+                if let Some(n) = chars.next() { out.push(n); }
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if in_char {
+            out.push(c);
+            if c == esc {
+                if let Some(n) = chars.next() { out.push(n); }
+            } else if c == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        if c == '"' { in_str = true; out.push(c); continue; }
+        if c == '\'' { in_char = true; out.push(c); continue; }
+        if c == '/' && chars.peek() == Some(&'/') { break; }
+        out.push(c);
+    }
+    out
+}
 
 /// Remove spaces/tabs so guard checks match regardless of formatting style
 /// (`fclose( fp )` vs `fclose(fp)`). Newlines are kept.

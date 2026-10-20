@@ -6,7 +6,7 @@
 [![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#install)
 
 Lightning-fast linter for **Pawn / AMX Mod X** plugins (CS 1.6), with deep **Zombie Plague 5.0** support.  
-Scans `.sma` files for **106 detectors**: compile errors before you compile, runtime-crash patterns
+Scans `.sma` files for **150+ detectors**: compile errors before you compile, runtime-crash patterns
 (HLDS `svc_bad` / segfault / run time errors 3/4/10/11), engine limits (precache/edicts/netchan),
 tag-mismatch bugs, and ZP50 API contract violations.
 
@@ -17,7 +17,8 @@ Written in **Rust**, parallelized with rayon. Single binary, zero runtime depend
 ~1.7s for 542 files. Reads Windows-1252 legacy files, honors `#pragma ctrlchar`.
 
 Validated against two corpora: the official `alliedmodders/amxmodx` bundled plugins
-(**0 errors** — canonical code passes clean) and a 542-file real-world ZP plugin collection.
+(**0 errors** excluding `plugins/testsuite`, which intentionally exercises invalid paths) and
+a 542-file real-world ZP plugin collection.
 
 ## Install
 
@@ -47,6 +48,46 @@ zplint lint file.sma     # Lint specific file
 zplint lint folder/      # Lint .sma files under a folder
 zplint watch             # Re-lint on file save
 zplint fix               # Apply auto-fixes
+zplint explain <rule>    # Show the docs entry and severity for a rule id
+
+# CI / editor workflow
+zplint lint --json --max-diagnostics 0
+zplint lint --only handle_leak,menu_handler_handled
+zplint lint --skip get_cvar_hotpath,deprecated_symbols
+zplint lint --error-on-warnings
+```
+
+### Biome-style workflow
+
+```bash
+zplint rules                       # list ids, category, severity, description
+zplint rules --json
+zplint lint --only=style           # category selector
+zplint lint --skip=performance
+zplint lint --reporter=github      # default | json | github | sarif | junit
+zplint ci                          # read-only, warnings fail
+zplint ci --changed --since=main   # only files changed since main
+zplint ci --staged                 # only staged files
+zplint fix                         # safe fixes only
+zplint fix --unsafe-fixes          # include semantic narrowing fixes
+zplint fmt --check                 # verify formatting
+zplint fmt --write                 # indentation, include order, whitespace
+zplint lsp                         # diagnostics, hover, quick fixes, format
+```
+
+### Suppressions
+
+Biome-style comment suppressions work on the same line, the next code line, or
+the whole file. An optional rule list narrows the suppression; everything after
+`--` is a free-text reason.
+
+```pawn
+abort() // zplint-ignore abort_call -- test fixture
+
+// zplint-ignore-next-line get_user_msgid_in_precache -- ids are cached below
+get_user_msgid("TextMsg")
+
+// zplint-ignore-file duplicate_include -- generated file
 ```
 
 ## Compiler
@@ -87,7 +128,7 @@ parity. Runtime reference and zplint artifacts both emit `ZPLINT_RUNTIME_PASS`.
 Generated code is not byte-identical to `amxxpc`; production rollout should still
 start as a canary and keep the runtime gate mandatory.
 
-## Rules (106 detectors)
+## Rules (150+ detectors)
 
 ### Player Validation (8)
 | Rule | Severity | Fix | Description |
@@ -146,7 +187,7 @@ start as a canary and keep the runtime gate mandatory.
 | `client_cmd_spk` | warning | ❌ | client_cmd(0, "spk...") instead of emit_sound |
 | `hardcoded_maxplayers` | warning | ❌ | loop uses `#define MAXPLAYERS 32` as runtime player count |
 
-## Research-driven detectors (69)
+## Research-driven detectors
 
 Added from internet research of real compile errors, crash reports and API docs
 (sources in [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md)). All are on by default; turn any off
@@ -247,6 +288,47 @@ via `rules.disable` (see Config).
 | `zp50_get_in_init` | warning | zp50 query natives in plugin_init ("Invalid Array Handle" load-order bug) |
 | `zp43_mixing` | warning | ZP 4.3 API (`<zombieplague>`) mixed with zp50 includes |
 
+### Semantic warnings (4)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `unused_symbol` | warning | Local/global declared but never read (amxxpc warning 203) |
+| `write_only_symbol` | warning | Assigned but never read (warning 204) |
+| `use_before_init` | warning | Scalar read before its first assignment (warning 210; Pawn does not zero scalars) |
+| `unintended_bitwise` | warning | `&`/`|` between two boolean expressions (warning 212) |
+
+### Security & player contracts (5)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `sql_injection` | warning | User-controlled `%s` in `SQL_PrepareQuery`/`SQL_ThreadQuery` without `SQL_QuoteString` |
+| `resource_leak_on_return` | warning | Handle freed later but leaked by an early `return` (path-aware) |
+| `get_players_flags` | warning | Contradictory `get_players` flags (`ab`, `cd`) or `e`/`f` without the team/name argument |
+| `find_player_flags` | warning | `find_player` userid match (`k`) combined with name/authid flags |
+| `read_data_bounds` | warning | `read_data(N)` outside the event's argument range |
+
+### Contracts, includes & tooling (5)
+
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `menu_handler_handled` | warning | `menu_create` handler never returns `PLUGIN_HANDLED` (legacy menu handlers can also consume the selection) |
+| `get_user_msgid_in_precache` | warning | `get_user_msgid()` in `plugin_precache` returns 0 on the first server start |
+| `duplicate_include` | warning | Duplicate `#include` in `<...>` or `"..."` form |
+| `unknown_pragma` | warning | `#pragma` outside amxxpc's vocabulary (warning 207, silently ignored) |
+| `sizeof_scalar` | warning | `sizeof` on a scalar is always 1 (warning 223) |
+
+Two existing rules were widened in the same batch:
+
+- `callback_not_defined` / `registered_callback_public` now cover
+  `register_event`, `register_forward`, `RegisterHam*`, `register_think`,
+  `register_touch`, `register_impulse` and `register_logevent` — not just the
+  command/menu/message registrations.
+- `handle_leak` / `handle_use_after_destroy` now cover 24 constructor/destructor
+  pairs from the bundled includes: array, trie, stack, datapack, tr2, kvd,
+  forward, SQL tuple/connection, DBI, nvault, regex, socket, SMC/INI parser and
+  JSON handles. Globals stay exempt (plugin lifetime); locals are checked.
+
+The full research, gap matrix and prioritized backlog are in
+[`docs/BIOME_PARITY.md`](docs/BIOME_PARITY.md).
+
 ## Config
 
 `zplint.toml` in project root:
@@ -289,3 +371,5 @@ engineering rules that keep GPL code out of this repository are in
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
 in this work shall be licensed as above, without any additional terms or conditions.
+
+

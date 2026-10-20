@@ -42,6 +42,7 @@ exclude = ["/.github", "/scripts", "/AGENTS.md"]
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 termcolor = "1"
 walkdir = "2"
@@ -55,6 +56,7 @@ zpc-lex.workspace = true
 zpc-parse.workspace = true
 zpc-codegen.workspace = true
 zpc-diag.workspace = true
+zpc-sema.workspace = true
 
 [profile.release]
 opt-level = 3
