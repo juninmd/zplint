@@ -38,6 +38,42 @@ pub static DANGEROUS_FORWARDS: &[(&str, &str)] = &[
     ("Ham_Killed", "victim"),
 ];
 
+/// Remove a `//` line comment while keeping string and character literals
+/// intact. `esc` is the file's escape character (`^` by default, `\` after
+/// `#pragma ctrlchar`). Used by rules that must see quoted callback names but
+/// must not match registration calls that are commented out.
+pub fn strip_line_comment(line: &str, esc: char) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut in_str = false;
+    let mut in_char = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            if c == esc {
+                if let Some(n) = chars.next() { out.push(n); }
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if in_char {
+            out.push(c);
+            if c == esc {
+                if let Some(n) = chars.next() { out.push(n); }
+            } else if c == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        if c == '"' { in_str = true; out.push(c); continue; }
+        if c == '\'' { in_char = true; out.push(c); continue; }
+        if c == '/' && chars.peek() == Some(&'/') { break; }
+        out.push(c);
+    }
+    out
+}
+
 /// Remove spaces/tabs so guard checks match regardless of formatting style
 /// (`fclose( fp )` vs `fclose(fp)`). Newlines are kept.
 pub fn squash(s: &str) -> String {

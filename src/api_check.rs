@@ -94,6 +94,7 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
         if all_includes_known
             && config.enabled("api_missing_include")
             && !provided.contains(f.include)
+            && !cross_mod_include(f.name).is_some_and(|alts| alts.iter().any(|i| provided.contains(i)))
         {
             issues.push(iss(
                 call.lineno,
@@ -392,6 +393,31 @@ fn included_set(lines: &[&str]) -> (HashSet<&'static str>, bool) {
     (set, any && all_known)
 }
 
+/// Natives that several game-mod includes declare with the same name.
+///
+/// The generated table stores one `include` per name (the first declaration
+/// wins), so `get_user_wstats` is recorded as `<csstats>` even though
+/// `dodstats`, `tfcstats` and `tsstats` declare the identical native for their
+/// mod. The official `dod/`, `tfc/` and `ts/` plugins include their own stats
+/// header and would otherwise be told to add `<csstats>` (which does not exist
+/// on those mods). The list is the full duplicate set from the bundled
+/// includes, so the check stays exact.
+fn cross_mod_include(name: &str) -> Option<&'static [&'static str]> {
+    static STATS: &[&str] = &["csstats", "dodstats", "tfcstats", "tsstats"];
+    static XMOD: &[&str] = &["csx", "dodx", "tfcx", "tsx"];
+    static STATSFWD: &[&str] = &["dodx", "tfcx", "tsx"];
+    let alts = match name {
+        "get_user_wstats" | "get_user_stats" | "get_user_rstats" | "get_user_vstats"
+        | "get_user_astats" | "reset_user_wstats" | "get_stats" | "get_statsnum"
+        | "get_user_stats2" | "get_stats2" => STATS,
+        "xmod_get_wpnname" | "xmod_get_wpnlogname" | "xmod_get_maxweapons"
+        | "xmod_get_stats_size" | "xmod_is_melee_wpn" | "xmod_is_custom_wpn" => XMOD,
+        "register_statsfwd" => STATSFWD,
+        _ => return None,
+    };
+    Some(alts)
+}
+
 /// Closest API name within edit distance 1, used to report obvious typos only.
 /// Anything further away is far more likely to be a symbol we simply do not know.
 fn near_miss(name: &str) -> Option<&'static str> {
@@ -591,6 +617,11 @@ mod tests {
         // a third-party include could provide anything, so the rule backs off
         let unknown = body("#include <amxmodx>\n#include <zombieplague>", "\tcs_get_user_money(1)");
         assert!(!lint(&unknown).contains(&"api_missing_include"));
+
+        // get_user_wstats is declared identically by csstats/dodstats/tfcstats/tsstats;
+        // a TS plugin including <tsx> must not be told to add <csstats>.
+        let cross_mod = body("#include <tsx>", "\tnew s[STATSX_MAX_STATS], h[MAX_BODYHITS]\n\tget_user_wstats(1, 2, s, h)");
+        assert!(!lint(&cross_mod).contains(&"api_missing_include"));
     }
 
     #[test]

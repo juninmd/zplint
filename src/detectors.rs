@@ -548,6 +548,41 @@ static RE_CALLBACK_STR: LazyLock<Regex> = LazyLock::new(|| {
     // first arg (no comma/paren inside), then the quoted callback name
     Regex::new(r#"\b(register_clcmd|register_concmd|register_srvcmd|register_logevent|register_message|menu_create)\s*\([^,()]+,\s*"([A-Za-z_]\w*)""#).unwrap()
 });
+/// Callback registrations whose handler must be a `public` function. Each
+/// regex captures the native in group 1 and the callback name in group 2.
+/// These are the families the original `registered_callback_public` regex
+/// missed; `RegisterHam` has the callback as its **third** argument, hence the
+/// separate shape.
+pub(crate) static RE_CALLBACK_MORE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
+        Regex::new(r#"\b(register_event)\s*\(\s*"[^"]*"\s*,\s*"([A-Za-z_]\w*)""#).unwrap(),
+        Regex::new(r#"\b(register_forward)\s*\(\s*[^,()]+(?:\([^)]*\))?\s*,\s*"([A-Za-z_]\w*)""#).unwrap(),
+        Regex::new(r#"\b(RegisterHam(?:FromEntity|Player)?)\s*\(\s*[^,]+,\s*"[^"]*"\s*,\s*"([A-Za-z_]\w*)""#).unwrap(),
+        Regex::new(r#"\b(register_think)\s*\(\s*"[^"]*"\s*,\s*"([A-Za-z_]\w*)""#).unwrap(),
+        Regex::new(r#"\b(register_touch)\s*\(\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*"([A-Za-z_]\w*)""#).unwrap(),
+        Regex::new(r#"\b(register_impulse)\s*\(\s*[^,]+,\s*"([A-Za-z_]\w*)""#).unwrap(),
+        Regex::new(r#"\b(register_logevent)\s*\(\s*"[^"]*"\s*,\s*[^,]+,\s*"([A-Za-z_]\w*)""#).unwrap(),
+    ]
+});
+
+static RE_MENU_CREATE_HANDLER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\bmenu_create\s*\(\s*"[^"]*"\s*,\s*"([A-Za-z_]\w*)""#).unwrap()
+});
+static RE_INCLUDE_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s*#include\s*[<"]([^>"]+)[>"]"#).unwrap());
+static RE_PRAGMA_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*#pragma\s+([A-Za-z_]\w*)").unwrap());
+static RE_SIZEOF_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bsizeof\s*\(?\s*([A-Za-z_]\w*)").unwrap());
+
+/// The pragmas `amxxpc` accepts (sc2.c). Anything else is warning 207 and is
+/// silently ignored, which is how a typo (`#pragma tabize 4`) loses its effect.
+static KNOWN_PRAGMAS: &[&str] = &[
+    "align", "amxlimit", "codepage", "compress", "ctrlchar", "defclasslib", "deprecated",
+    "dynamic", "expclass", "explib", "library", "loadlib", "pack", "rational", "reqlib",
+    "reqclass", "semicolon", "showstackusageinfo", "tabsize", "unused",
+];
+
 static RE_PUBLIC_HANDLED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"return\s+PLUGIN_HANDLED\b").unwrap());
 static RE_IDENT_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*$").unwrap());
 static RE_HAM_DMG_CB: LazyLock<Regex> = LazyLock::new(|| {
@@ -580,10 +615,66 @@ static RE_REGISTER_MESSAGE_ID: LazyLock<Regex> = LazyLock::new(|| {
 static RE_MESSAGE_BEGIN_ID: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[^e_\w])message_begin\s*\(\s*[^,]+,\s*([^,)]+)").unwrap()
 });
+/// Constructor → destructor pairs documented in the bundled includes. Every
+/// row is a native whose own doc comment says the returned handle must be freed
+/// (`cellarray.inc`, `celltrie.inc`, `datapack.inc`, `sqlx.inc`, `nvault.inc`,
+/// `regex.inc`, `sockets.inc`, `textparse_*.inc`, `json.inc`,
+/// `fakemeta.inc`, `hamsandwich.inc`, `amxmodx.inc`).
+pub const HANDLE_FAMILIES: &[(&str, &str)] = &[
+    ("ArrayCreate", "ArrayDestroy"),
+    ("ArrayClone", "ArrayDestroy"),
+    ("TrieCreate", "TrieDestroy"),
+    ("TrieSnapshotCreate", "TrieSnapshotDestroy"),
+    ("TrieIterCreate", "TrieIterDestroy"),
+    ("CreateDataPack", "DestroyDataPack"),
+    ("CreateStack", "DestroyStack"),
+    ("CreateHamItemInfo", "FreeHamItemInfo"),
+    ("CreateMultiForward", "DestroyForward"),
+    ("CreateOneForward", "DestroyForward"),
+    ("create_tr2", "free_tr2"),
+    ("create_kvd", "free_kvd"),
+    ("SQL_MakeDbTuple", "SQL_FreeHandle"),
+    ("SQL_MakeStdTuple", "SQL_FreeHandle"),
+    ("SQL_Connect", "SQL_FreeHandle"),
+    ("nvault_open", "nvault_close"),
+    ("regex_compile", "regex_free"),
+    ("regex_compile_ex", "regex_free"),
+    ("socket_open", "socket_close"),
+    ("SMC_CreateParser", "SMC_DestroyParser"),
+    ("INI_CreateParser", "INI_DestroyParser"),
+    ("json_parse", "json_free"),
+    ("dbi_connect", "dbi_close"),
+    ("dbi_query", "dbi_free_result"),
+];
+
+/// The destructor paired with a constructor, if it is one zplint knows.
+fn handle_destructor(create: &str) -> Option<&'static str> {
+    HANDLE_FAMILIES.iter().find(|(c, _)| *c == create).map(|(_, d)| *d)
+}
+
 // Dynamic handles that the plugin owns and must free (cellarray/celltrie/datapack docs:
 // "plugins are responsible for freeing all handles they acquire").
 static RE_HANDLE_NEW: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\bnew\s+(?:\w+:)?([A-Za-z_]\w*)\s*=\s*(ArrayCreate|ArrayClone|TrieCreate|TrieSnapshotCreate|CreateDataPack)\s*\(").unwrap()
+    let names = HANDLE_FAMILIES.iter().map(|(c, _)| *c).collect::<Vec<_>>().join("|");
+    Regex::new(&format!(
+        r"\bnew\s+(?:\w+:)?([A-Za-z_]\w*)\s*=\s*({names})\s*\("
+    ))
+    .unwrap()
+});
+
+// Destructors, plus the two that predate the table. Used by
+// `handle_use_after_destroy`; `SQL_FreeHandle` and friends take the handle
+// directly, while ArrayDestroy/TrieDestroy/free_tr2 take it by reference.
+static RE_HANDLE_DESTROY: LazyLock<Regex> = LazyLock::new(|| {
+    let mut names: Vec<&str> = HANDLE_FAMILIES.iter().map(|(_, d)| *d).collect();
+    names.extend(["menu_destroy", "fclose"]);
+    names.sort_unstable();
+    names.dedup();
+    Regex::new(&format!(
+        r"\b({})\s*\(\s*([A-Za-z_]\w*)\s*\)",
+        names.join("|")
+    ))
+    .unwrap()
 });
 // random_num()'s upper bound is INCLUSIVE, so a bare sizeof/ArraySize overruns by one.
 static RE_RANDOM_NUM_BOUND: LazyLock<Regex> = LazyLock::new(|| {
@@ -626,9 +717,7 @@ static RE_SAY_CLCMD: LazyLock<Regex> = LazyLock::new(|| {
 static RE_CS_SET_MODEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bcs_set_user_model\s*\(").unwrap());
 // Handle-freeing natives: after these the variable is dead (ArrayDestroy/TrieDestroy even
 // zero it by reference "to aid in preventing accidental usage after destroy").
-static RE_HANDLE_DESTROY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(ArrayDestroy|TrieDestroy|TrieSnapshotDestroy|DestroyDataPack|menu_destroy|fclose)\s*\(\s*([A-Za-z_]\w*)\s*\)").unwrap()
-});
+// The pattern itself is built from `HANDLE_FAMILIES` above.
 // A repeating task ("b" flag) keyed by a player index must be cancelled when that player
 // leaves, or it keeps firing on an empty slot.
 static RE_TASK_ID_PLAYER: LazyLock<Regex> = LazyLock::new(|| {
@@ -742,9 +831,82 @@ fn assignment_in_condition(line: &str) -> bool {
     false
 }
 
+/// Names declared as scalars (`new x`, `new Float:y`, `static z`). Used by
+/// `sizeof_scalar`: `sizeof` on one of these is always 1 (amxxpc warning 223),
+/// which is usually a sizeof/size confusion rather than intent.
+fn collect_scalars(sanitized: &[(String, bool)]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for (san, _) in sanitized {
+        let s = san.trim_start();
+        let rest = if let Some(r) = s.strip_prefix("new ") {
+            r
+        } else if let Some(r) = s.strip_prefix("static ") {
+            r
+        } else if let Some(r) = s.strip_prefix("const ") {
+            r
+        } else {
+            continue;
+        };
+        let mut rest = rest.trim_start();
+        // Optional tag (`Float:x`, `bool:x`, `CsTeams:x`).
+        if let Some(colon) = rest.find(':') {
+            let tag = &rest[..colon];
+            if !tag.is_empty() && tag.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                rest = rest[colon + 1..].trim_start();
+            }
+        }
+        for part in split_top_level(rest, ',') {
+            let part = part.trim_start();
+            let name: String = part
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            // A declarator with `[` before its initialiser is an array.
+            let lhs = part.split('=').next().unwrap_or(part);
+            if !lhs.contains('[') {
+                out.insert(name);
+            }
+        }
+    }
+    out
+}
+
+/// Split on `sep` only at bracket depth 0, stopping at the statement's `;`.
+fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth -= 1,
+            ';' if depth == 0 => break,
+            c if c == sep && depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
 pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut Vec<crate::rules::LintIssue>) {
     let esc = if raw_clean.contains(r"#pragma ctrlchar '\'") { '\\' } else { '^' };
     let sanitized: Vec<(String, bool)> = lines.iter().map(|l| sanitize_line(l, esc)).collect();
+    // Same lines with `//` comments removed but string literals kept. Callback
+    // registrations live in quoted strings, so they cannot use `sanitized`
+    // (which blanks the strings) and must not use `raw_clean` (which still
+    // contains commented-out examples).
+    let raw_nc = lines
+        .iter()
+        .map(|l| strip_line_comment(l, esc))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Shared context: brace depth per line, loop membership, function names.
     let mut depth_before: Vec<i32> = Vec::with_capacity(lines.len());
@@ -777,6 +939,7 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
     let publics = find_publics(raw_clean);
     let mut function_names: Vec<String> = publics.iter().map(|n| n.to_string()).collect();
     function_names.extend(find_nonpublics(raw_clean, &publics));
+    let scalars = collect_scalars(&sanitized);
 
     let has_pragma_dynamic = RE_PRAGMA_DYNAMIC.is_match(raw_clean);
     let raw_sq = squash(raw_clean);
@@ -1384,21 +1547,26 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
         // they acquire ... failing to free them results in the plugin and AMXX leaking memory".
         // A handle created in a LOCAL (`new`) and never destroyed in the same function leaks on
         // every call - globals are excluded, they are the legitimate plugin-lifetime pattern.
-        if config.enabled("handle_leak") && let Some(caps) = RE_HANDLE_NEW.captures(san) {
+        // A `new` at brace depth 0 is a global: the plugin-lifetime pattern is
+        // legitimate (free it in plugin_end, which this rule cannot see from
+        // here), so only locals are reported.
+        if config.enabled("handle_leak") && depth_before[i] > 0
+            && let Some(caps) = RE_HANDLE_NEW.captures(san)
+        {
             let var = caps.get(1).unwrap().as_str();
             let create = caps.get(2).unwrap().as_str();
-            let destroy = match create {
-                "TrieCreate" => "TrieDestroy",
-                "TrieSnapshotCreate" => "TrieSnapshotDestroy",
-                "CreateDataPack" => "DestroyDataPack",
-                _ => "ArrayDestroy",
-            };
+            let Some(destroy) = handle_destructor(create) else { continue };
             let body_sq = squash(&enclosing_body(lines, i));
             // `return h` / `f(x, h)` hand the handle to the caller or to another container -
             // ownership leaves this function and the destroy belongs elsewhere.
+            // Ownership leaves the function on `return h`, when `h` is passed to
+            // another call, and when it is stored in a global/array (`g = h`).
+            let assigned_out = Regex::new(&format!(r"=[^=;\n]*\b{}\b", regex::escape(var)))
+                .is_ok_and(|re| re.is_match(&body_sq));
             let escapes = body_sq.contains(&format!("return{}", var))
                 || body_sq.contains(&format!(",{})", var))
-                || body_sq.contains(&format!(",{},", var));
+                || body_sq.contains(&format!(",{},", var))
+                || assigned_out;
             if !body_sq.contains(&format!("{}({})", destroy, var)) && !escapes {
                 issues.push(iss(lineno, format!("{}() handle '{}' is never freed with {}({}) in this function - the plugin leaks memory on every call", create, var, destroy, var), "handle_leak", false));
             }
@@ -1635,16 +1803,113 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
         }
 
     if config.enabled("callback_not_defined") {
-        for caps in RE_CALLBACK_STR.captures_iter(raw_clean) {
+        // register_event / register_forward / RegisterHam / register_think /
+        // register_touch / register_impulse / register_logevent are the other
+        // registration families; the callback is the quoted string in a
+        // family-specific position, captured by RE_CALLBACK_MORE.
+        let more = RE_CALLBACK_MORE
+            .iter()
+            .flat_map(|re| re.captures_iter(&raw_nc));
+        for caps in RE_CALLBACK_STR
+            .captures_iter(&raw_nc)
+            .chain(more)
+        {
             let cb = caps.get(2).unwrap().as_str();
             if function_names.iter().any(|f| f == cb) { continue; }
             // RegisterHam/register_event string args can be event/class names, not callbacks;
             // only flag identifiers that look like function names and are truly absent.
-            if !raw_sq.contains(&format!("{}(", cb)) {
+            if !squash(&raw_nc).contains(&format!("{}(", cb)) {
                 let native = caps.get(1).unwrap().as_str();
-                let lineno = raw_clean[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+                let lineno = raw_nc[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
                 issues.push(iss(lineno, format!("{} callback \"{}\" has no function definition in this file - plugin fails at load with 'function not found'", native, cb), "callback_not_defined", false));
             }
+        }
+    }
+
+    // newmenus.inc: "The handler function should always return PLUGIN_HANDLED
+    // to block any old menu handlers from potentially feeding on the menu,
+    // unless that is the desired functionality." A handler that returns
+    // PLUGIN_CONTINUE lets legacy show_menu handlers act on the same key press.
+    if config.enabled("menu_handler_handled") {
+        for caps in RE_MENU_CREATE_HANDLER.captures_iter(&raw_nc) {
+            let cb = caps.get(1).unwrap().as_str();
+            let body = find_function_body_in(lines, cb);
+            if body.is_empty() || body.contains("PLUGIN_HANDLED") { continue; }
+            let lineno = raw_nc[..caps.get(0).unwrap().start()].matches('\n').count() + 1;
+            issues.push(iss(
+                lineno,
+                format!("menu_create handler \"{}\" never returns PLUGIN_HANDLED - newmenus.inc says it should, or old show_menu handlers can also consume the selection", cb),
+                "menu_handler_handled",
+                false,
+            ));
+        }
+    }
+
+    // amxmodx.inc get_user_msgid(): "On first server start, this function will
+    // return 0 if used inside plugin_precache()." Sending message id 0 is not a
+    // valid client message - hooks registered from precache silently miss.
+    if config.enabled("get_user_msgid_in_precache") {
+        for (i, (san, _)) in sanitized.iter().enumerate() {
+            if !san.contains("get_user_msgid(") { continue; }
+            if enclosing_function_name(lines, i, &function_names).as_deref() != Some("plugin_precache") {
+                continue;
+            }
+            issues.push(iss(
+                i + 1,
+                "get_user_msgid() inside plugin_precache() returns 0 on the first server start (amxmodx.inc) - cache message ids in plugin_init, or hook RegUserMsg".into(),
+                "get_user_msgid_in_precache",
+                false,
+            ));
+        }
+    }
+
+    // Duplicate includes are harmless to the compiler (include guards) but
+    // they hide an organise-includes pass gone wrong and slow every compile.
+    if config.enabled("duplicate_include") {
+        let mut seen: HashSet<String> = HashSet::new();
+        for (i, line) in raw_nc.lines().enumerate() {
+            let Some(caps) = RE_INCLUDE_LINE.captures(line) else { continue };
+            let name = caps.get(1).unwrap().as_str().trim().trim_end_matches(".inc").to_lowercase();
+            if !seen.insert(name.clone()) {
+                issues.push(iss(
+                    i + 1,
+                    format!("#include <{}> is already included above - remove the duplicate (include guards make it a no-op, but it hides an organise-includes mistake)", name),
+                    "duplicate_include",
+                    false,
+                ));
+            }
+        }
+    }
+
+    // sc2.c accepts a fixed pragma vocabulary; anything else is warning 207 and
+    // is ignored, so a typo silently loses the setting it was meant to apply.
+    if config.enabled("unknown_pragma") {
+        for (i, (san, _)) in sanitized.iter().enumerate() {
+            let Some(caps) = RE_PRAGMA_NAME.captures(san) else { continue };
+            let name = caps.get(1).unwrap().as_str();
+            if KNOWN_PRAGMAS.contains(&name) { continue; }
+            issues.push(iss(
+                i + 1,
+                format!("#pragma {} is not an amxxpc pragma (warning 207: unknown #pragma) - it is ignored", name),
+                "unknown_pragma",
+                false,
+            ));
+        }
+    }
+
+    // amxxpc warning 223: sizeof on a scalar is always 1. Almost always a
+    // confusion with an array/parameter of the same name.
+    if config.enabled("sizeof_scalar") {
+        for (i, (san, _)) in sanitized.iter().enumerate() {
+            let Some(caps) = RE_SIZEOF_NAME.captures(san) else { continue };
+            let name = caps.get(1).unwrap().as_str();
+            if !scalars.contains(name) { continue; }
+            issues.push(iss(
+                i + 1,
+                format!("sizeof {} is always 1 - '{}' is a scalar, not an array (warning 223: redundant sizeof)", name, name),
+                "sizeof_scalar",
+                false,
+            ));
         }
     }
 
@@ -2595,5 +2860,94 @@ mod tests {
         assert!(r.contains(&"damage_in_sphere_loop"));
         let ok = lint_str("sphere2", "public blast(ent, origin[3]) {\n\tnew id = -1;\n\twhile ((id = find_ent_in_sphere(id, origin, 100.0))) {\n\t\tzp_colored_print(id, \"boom\");\n\t}\n}\n");
         assert!(!ok.contains(&"damage_in_sphere_loop"));
+    }
+
+    #[test]
+    fn callback_families_must_be_public_and_defined() {
+        // register_event callback that is not defined -> callback_not_defined
+        let missing = lint_str("cbev1", "public plugin_init() {\n\tregister_event(\"DeathMsg\", \"event_death\", \"a\");\n}\n");
+        assert!(missing.contains(&"callback_not_defined"));
+
+        // defined but not public -> registered_callback_public
+        let nonpub = lint_str("cbev2", "public plugin_init() {\n\tregister_event(\"DeathMsg\", \"event_death\", \"a\");\n}\nevent_death() {\n\treturn PLUGIN_CONTINUE;\n}\n");
+        assert!(nonpub.contains(&"registered_callback_public"));
+
+        // RegisterHam's callback is the third argument
+        let ham = lint_str("cbham", "public plugin_init() {\n\tRegisterHam(Ham_TakeDamage, \"player\", \"fw_Dmg\");\n}\nfw_Dmg() {\n\treturn HAM_IGNORED;\n}\n");
+        assert!(ham.contains(&"registered_callback_public"));
+
+        // a commented-out registration is not a registration
+        let commented = lint_str("cbcmt", "// register_event(\"DeathMsg\", \"event_death\", \"a\");\npublic plugin_init() {\n}\n");
+        assert!(!commented.contains(&"callback_not_defined"));
+
+        // public definition -> clean
+        let ok = lint_str("cbok", "public plugin_init() {\n\tregister_event(\"DeathMsg\", \"event_death\", \"a\");\n}\npublic event_death() {\n\treturn PLUGIN_CONTINUE;\n}\n");
+        assert!(!ok.contains(&"callback_not_defined"));
+        assert!(!ok.contains(&"registered_callback_public"));
+    }
+
+    #[test]
+    fn menu_handler_must_return_plugin_handled() {
+        let r = lint_str("menu1", "public plugin_init() {\n\tmenu_create(\"Menu\", \"handler\");\n}\npublic handler(id, menu, item) {\n\treturn PLUGIN_CONTINUE;\n}\n");
+        assert!(r.contains(&"menu_handler_handled"));
+        let ok = lint_str("menu2", "public plugin_init() {\n\tmenu_create(\"Menu\", \"handler\");\n}\npublic handler(id, menu, item) {\n\treturn PLUGIN_HANDLED;\n}\n");
+        assert!(!ok.contains(&"menu_handler_handled"));
+    }
+
+    #[test]
+    fn get_user_msgid_in_precache() {
+        let r = lint_str("msgpre1", "public plugin_precache() {\n\tnew id = get_user_msgid(\"TextMsg\");\n}\n");
+        assert!(r.contains(&"get_user_msgid_in_precache"));
+        let ok = lint_str("msgpre2", "public plugin_init() {\n\tnew id = get_user_msgid(\"TextMsg\");\n}\n");
+        assert!(!ok.contains(&"get_user_msgid_in_precache"));
+    }
+
+    #[test]
+    fn duplicate_include_in_both_quote_styles() {
+        let r = lint_str("incdup", "#include <amxmodx>\n#include \"amxmodx.inc\"\n#include <cstrike>\n");
+        assert!(r.contains(&"duplicate_include"));
+        let ok = lint_str("incok", "#include <amxmodx>\n#include <cstrike>\n");
+        assert!(!ok.contains(&"duplicate_include"));
+    }
+
+    #[test]
+    fn unknown_pragma_flagged() {
+        let r = lint_str("pragma1", "#pragma tabize 4\npublic f() {\n}\n");
+        assert!(r.contains(&"unknown_pragma"));
+        let ok = lint_str("pragma2", "#pragma tabsize 4\n#pragma dynamic 32768\npublic f() {\n}\n");
+        assert!(!ok.contains(&"unknown_pragma"));
+    }
+
+    #[test]
+    fn sizeof_scalar_flagged() {
+        let r = lint_str("sizeof1", "public f() {\n\tnew x;\n\tnew buf[sizeof x];\n}\n");
+        assert!(r.contains(&"sizeof_scalar"));
+        // an array declaration is not a scalar
+        let ok = lint_str("sizeof2", "public f() {\n\tnew arr[8];\n\tnew buf[sizeof arr];\n}\n");
+        assert!(!ok.contains(&"sizeof_scalar"));
+    }
+
+    #[test]
+    fn handle_leak_covers_new_families_but_not_globals() {
+        let r = lint_str("hl1", "public f() {\n\tnew tr = create_tr2();\n\ttrace_line(0, v1, v2, v3);\n}\n");
+        assert!(r.contains(&"handle_leak"));
+        let r2 = lint_str("hl2", "public f() {\n\tnew Handle:h = SQL_Connect(t, e, err, 255);\n}\n");
+        assert!(r2.contains(&"handle_leak"));
+        let ok = lint_str("hl3", "public f() {\n\tnew tr = create_tr2();\n\ttrace_line(0, v1, v2, v3);\n\tfree_tr2(tr);\n}\n");
+        assert!(!ok.contains(&"handle_leak"));
+        // a global handle is plugin-lifetime, not a per-call leak
+        let global = lint_str("hl4", "new Handle:g_db;\npublic f() {\n}\n");
+        assert!(!global.contains(&"handle_leak"));
+        // ownership handed to a global is not a leak in this function
+        let escaped = lint_str("hl5", "new Handle:g_db;\npublic f() {\n\tnew Handle:h = SQL_Connect(t, e, err, 255);\n\tg_db = h;\n}\n");
+        assert!(!escaped.contains(&"handle_leak"));
+    }
+
+    #[test]
+    fn handle_use_after_destroy_covers_sql() {
+        let r = lint_str("huad1", "public f() {\n\tnew Handle:h = SQL_Connect(t, e, err, 255);\n\tSQL_FreeHandle(h);\n\tSQL_Execute(h);\n}\n");
+        assert!(r.contains(&"handle_use_after_destroy"));
+        let ok = lint_str("huad2", "public f() {\n\tnew Handle:h = SQL_Connect(t, e, err, 255);\n\tSQL_Execute(h);\n\tSQL_FreeHandle(h);\n}\n");
+        assert!(!ok.contains(&"handle_use_after_destroy"));
     }
 }

@@ -2,8 +2,11 @@
 
 Curated from web research (July 2026): AMXX compiler sources, AlliedModders wiki/forums,
 amxmodx.org API docs, CompuPhase Pawn docs, ZP 5.0 official sources. 118 raw findings from
-8 research angles, deduped and organized by category. Each entry: problem → consequence →
-detection notes → sources. Entries marked `[rule: <id>]` are implemented as zplint detectors.
+8 research angles, deduped and organized by category. A second pass (October 2026) covered
+the Biome analyzer model and every bundled include; its gap matrix and backlog live in
+`docs/BIOME_PARITY.md`, and the rules it shipped are in section 10 below. Each entry:
+problem → consequence → detection notes → sources. Entries marked `[rule: <id>]` are
+implemented as zplint detectors.
 
 Meta-constraint: amxxpc (libpc300) defines warnings **200–234 only** (verified in
 `compiler/libpc300/sc5-in.scp`; the array ends at 234 "recursive function"). Codes 235–240
@@ -552,16 +555,32 @@ Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/
 cellarray.inc and celltrie.inc state the contract explicitly: "the plugin is responsible for
 freeing all handles it acquires ... failing to free them results in the plugin AND AMXX
 leaking memory". AMXX does not garbage-collect these; they live until the plugin unloads.
-- **[rule: handle_leak]** `ArrayCreate/ArrayClone/TrieCreate/TrieSnapshotCreate/CreateDataPack`
-  assigned to a **local** (`new h = ...`) that the function never frees. Every call leaks a
-  whole container. Globals are deliberately excluded — a handle created once in
+- **[rule: handle_leak]** a handle constructor assigned to a **local** (`new h = ...`) that
+  the function never frees. Every call leaks a whole container. The family table now covers
+  every constructor whose own doc comment says the handle must be freed:
+  `ArrayCreate/ArrayClone → ArrayDestroy`, `TrieCreate → TrieDestroy`,
+  `TrieSnapshotCreate → TrieSnapshotDestroy`, `TrieIterCreate → TrieIterDestroy`,
+  `CreateDataPack → DestroyDataPack`, `CreateStack → DestroyStack`,
+  `CreateHamItemInfo → FreeHamItemInfo`, `CreateMultiForward/CreateOneForward → DestroyForward`,
+  `create_tr2 → free_tr2`, `create_kvd → free_kvd`,
+  `SQL_MakeDbTuple/SQL_MakeStdTuple/SQL_Connect → SQL_FreeHandle`,
+  `dbi_connect → dbi_close`, `dbi_query → dbi_free_result`,
+  `nvault_open → nvault_close`, `regex_compile/regex_compile_ex → regex_free`,
+  `socket_open → socket_close`, `SMC_CreateParser → SMC_DestroyParser`,
+  `INI_CreateParser → INI_DestroyParser`, `json_parse → json_free`.
+  Globals (brace depth 0) are deliberately excluded - a handle created once in
   `plugin_init`/`plugin_precache` and kept for the plugin's lifetime is the intended pattern
   (the official imessage/mapchooser/plmenu plugins all do it). Ownership hand-off is excluded
   too: `return h`, or `h` passed as a non-first argument to another call (stored elsewhere).
   Confirmed against the official testsuite: `sorttest.sma` (3 sites) and `arraytest.sma` leak
-  exactly this way.
-- **[rule: handle_use_after_destroy]** touching a handle after `ArrayDestroy/TrieDestroy/
-  TrieSnapshotDestroy/DestroyDataPack/menu_destroy/fclose` freed it → the native runs on
+  exactly this way; `sqlxtest.sma` deliberately leaks both a tuple and a connection in its
+  `SqlxTest_Bad` fixture.
+- **[rule: handle_use_after_destroy]** touching a handle after the matching destructor
+  (`ArrayDestroy`, `TrieDestroy`, `TrieSnapshotDestroy`, `TrieIterDestroy`,
+  `DestroyDataPack`, `DestroyStack`, `FreeHamItemInfo`, `DestroyForward`, `free_tr2`,
+  `free_kvd`, `SQL_FreeHandle`, `dbi_close`, `dbi_free_result`, `nvault_close`,
+  `regex_free`, `socket_close`, `SMC_DestroyParser`, `INI_DestroyParser`, `json_free`,
+  `menu_destroy`, `fclose`) freed it → the native runs on
   handle 0 (run time error 10). ArrayDestroy's doc notes it even zeroes the variable by
   reference "to aid in preventing accidental usage after destroy". Restricted to
   straight-line code (same brace depth, no intervening `return`/`case`/`else`/reassignment):
@@ -878,3 +897,97 @@ Each %L consumes target + key. LANG_PLAYER is for broadcasts (per-player languag
 LANG_SERVER on a broadcast forces server language on everyone; missing target shifts all
 arguments (garbage/runtime error). (Deferred detector: needs argument counting per format.)
 Sources: https://wiki.alliedmods.net/Advanced_Scripting_(AMX_Mod_X)
+
+---
+
+## 10. Contract, lifecycle and tooling rules (Biome-parity batch)
+
+Added after a second research pass over the bundled includes, `amxxpc`'s `sc2.c`/`sc5-in.scp`
+and Biome's analyzer model (see `docs/BIOME_PARITY.md`). The theme is the same as Biome's
+analyzer: rules should explain the defect, the consequence, and the fix.
+
+### 10.1 Menu handler must block legacy handlers `[rule: menu_handler_handled]`
+`newmenus.inc` on `menu_create`: "The handler function should always return PLUGIN_HANDLED to
+block any old menu handlers from potentially feeding on the menu, unless that is the desired
+functionality." A handler that returns `PLUGIN_CONTINUE` lets a legacy `show_menu` handler act
+on the same key press, so one selection can execute two menu paths. Detection: resolve the
+`menu_create` handler name to its body and flag a body with no `PLUGIN_HANDLED` at all.
+0 findings on the official plugins; 15 candidate files in the archive corpus.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/newmenus.inc ·
+https://www.amxmodx.org/api/newmenus/menu_create
+
+### 10.2 `get_user_msgid` inside `plugin_precache` `[rule: get_user_msgid_in_precache]`
+`amxmodx.inc`: "On first server start, this function will return 0 if used inside
+plugin_precache(). Consider hooking RegUserMsg in order to retrieve the correct message id."
+Message id 0 is not a valid client message: `register_message(0, ...)` hooks nothing and
+`message_begin(..., 0, ...)` sends an invalid message. Detection is scope-exact: the enclosing
+function must be `plugin_precache`. 0 findings on the official plugins; 8 candidates in the
+real corpus (all first-start-only bugs, hence warning severity).
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/amxmodx.inc
+
+### 10.3 Callback registration family is wider than the original regex `[rules: callback_not_defined, registered_callback_public]`
+AMXX requires registered callbacks to be `public`, and the string must resolve to a function in
+the plugin. The original checks covered `register_clcmd/concmd/srvcmd`, `register_menucmd`,
+`register_message`, `register_logevent`, `query_client_cvar`, `register_native`, `menu_create`,
+`menu_makecallback` and `set_error_filter`. The missing families are:
+`register_event` (2nd argument), `register_forward` (last quoted argument),
+`RegisterHam`/`RegisterHamFromEntity`/`RegisterHamPlayer` (3rd argument),
+`register_think` (2nd), `register_touch` (3rd), `register_impulse` (2nd) and
+`register_logevent` (3rd, which the old 2nd-argument regex never actually matched).
+Detection scans comment-stripped lines that still contain string literals, so a commented-out
+example is not a registration. Corpus: 15 missing/non-public callbacks in the archive; 0 on the
+official plugins after excluding comments.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/amxmodx.inc ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/hamsandwich.inc ·
+https://wiki.alliedmods.net/HamSandwich_General_Usage_(AMX_Mod_X)
+
+### 10.4 Duplicate `#include` `[rule: duplicate_include]`
+Include guards make a duplicate a no-op, but it is the visible residue of a bad
+organise-includes merge, and it doubles the preprocessor work for that header. Detection
+normalises `<amxmodx>` / `"amxmodx.inc"` to the same key. Warning. 0 on the official plugins;
+6 files in the real corpus.
+Sources: https://wiki.alliedmods.net/Pawn_preprocessor
+
+### 10.5 Unknown `#pragma` (warning 207) `[rule: unknown_pragma]`
+`sc2.c` accepts a fixed vocabulary: `align`, `amxlimit`, `codepage`, `compress`, `ctrlchar`,
+`defclasslib`, `deprecated`, `dynamic`, `expclass`, `explib`, `library`, `loadlib`, `pack`,
+`rational`, `reqlib`, `reqclass`, `semicolon`, `showstackusageinfo`, `tabsize`, `unused`.
+Anything else is warning 207 and is ignored, so a typo (`#pragma tabize 4`) silently loses the
+setting it was meant to apply. Warning.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc2.c ·
+https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp
+
+### 10.6 `sizeof` on a scalar (warning 223) `[rule: sizeof_scalar]`
+`sc5-in.scp` warning 223: "redundant sizeof: argument size is always 1". In Pawn a scalar cell
+is one cell, so `sizeof x` is 1; it usually means the author confused a scalar with the array
+of the same name, and the resulting buffer/loop bound is wrong. Detection only fires when the
+name is a known scalar declaration (`new`/`static`/`const`, no `[`), so array `sizeof` is
+never touched. Warning.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp
+
+### 10.7 Tooling parity: suppressions, `--only`/`--skip`, `--error-on-warnings`, `--json`, `explain`
+Biome's analyzer UX is a large part of why it feels better than a bag of regexes. zplint now
+mirrors the parts that matter for a compiler-adjacent linter:
+- `// zplint-ignore [rules]`, `// zplint-ignore-next-line [rules]`,
+  `// zplint-ignore-file [rules]`, with `-- reason` free text (Biome's `biome-ignore` family).
+- `--only RULE` / `--skip RULE` (repeatable/comma-separated) filter every rule, including the
+  legacy boolean-field rules, in one final pass.
+- `--error-on-warnings` makes CI fail on warnings without changing their severity.
+- `--max-diagnostics N` caps terminal output (0 = unlimited).
+- `--json` emits a stable machine-readable report for CI/editor bridges.
+- `zplint explain <rule>` prints the `docs/KNOWLEDGE.md` entry plus severity, so the rule id in
+  a diagnostic is actionable (Biome's `biome explain`).
+Sources: https://biomejs.dev/linter/ · https://biomejs.dev/analyzer/suppressions/ ·
+https://biomejs.dev/reference/cli/
+
+### 10.8 Cross-mod include aliases `[rule: api_missing_include]`
+The generated API table stores one include per native name, but `csstats`, `dodstats`,
+`tfcstats` and `tsstats` declare the same `get_user_*stats`/`get_stats*`/`reset_user_wstats`
+natives, and `csx`, `dodx`, `tfcx`, `tsx` declare the same `xmod_*` family. Without an alias
+table the official `dod/`, `tfc/` and `ts/` plugins were told to add `<csstats>`, which does
+not exist on those mods (71 false errors before the fix). `register_statsfwd` is also declared
+by `dodx`/`tfcx`/`tsx` only. The alias table is exhaustive for the duplicated names in the
+bundled includes, so the check stays exact.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/dodstats.inc ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/tfcstats.inc ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/tsstats.inc

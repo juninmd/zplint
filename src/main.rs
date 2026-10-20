@@ -35,6 +35,26 @@ enum Command {
     /// Lint .sma files (default)
     Lint {
         files: Vec<PathBuf>,
+        /// Run only these rule ids (repeatable, comma-separated, or `all`)
+        #[arg(long, value_name = "RULE", value_delimiter = ',')]
+        only: Vec<String>,
+        /// Skip these rule ids (repeatable, comma-separated, or `all`)
+        #[arg(long, value_name = "RULE", value_delimiter = ',')]
+        skip: Vec<String>,
+        /// Exit with status 1 when only warnings are reported
+        #[arg(long)]
+        error_on_warnings: bool,
+        /// Print at most N diagnostics (0 = unlimited)
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        max_diagnostics: usize,
+        /// Machine-readable JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the documentation entry for a rule id
+    Explain {
+        /// Rule id, e.g. `handle_leak`
+        rule: String,
     },
     /// Watch mode: re-lint on file changes
     Watch,
@@ -83,8 +103,11 @@ fn main() {
         Some(Command::Fix { files }) => {
             run_fix(&root, &cfg, files);
         }
-        Some(Command::Lint { files }) => {
-            run_lint(&root, &cfg, files);
+        Some(Command::Lint { files, only, skip, error_on_warnings, max_diagnostics, json }) => {
+            run_lint(&root, &cfg, files, LintOptions { only, skip, error_on_warnings, max_diagnostics, json });
+        }
+        Some(Command::Explain { rule }) => {
+            std::process::exit(explain(&rule));
         }
         Some(Command::Compile { file, output, includes, emit_asm }) => {
             std::process::exit(compile_cmd::run(&file, output, includes, emit_asm));
@@ -96,12 +119,26 @@ fn main() {
             std::process::exit(disasm_cmd::run(&file, normalised));
         }
         None => {
-            run_lint(&root, &cfg, cli.files);
+            run_lint(&root, &cfg, cli.files, LintOptions::default());
         }
     }
 }
 
-fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
+#[derive(Default)]
+struct LintOptions {
+    only: Vec<String>,
+    skip: Vec<String>,
+    error_on_warnings: bool,
+    max_diagnostics: usize,
+    json: bool,
+}
+
+fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, opts: LintOptions) {
+    let mut cfg = cfg.clone();
+    cfg.rules.only = opts.only;
+    cfg.rules.skip = opts.skip;
+    let cfg = &cfg;
+
     let sma_files = if files.is_empty() {
         discover::discover_files(root, &cfg.paths, &cfg.exclude)
     } else {
@@ -123,8 +160,62 @@ fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
         .collect();
     let elapsed = start.elapsed();
 
-    let exit_code = output::print_results(&results, elapsed, cfg.output.color);
+    let output_opts = output::OutputOptions {
+        color: cfg.output.color,
+        max_diagnostics: opts.max_diagnostics,
+        error_on_warnings: opts.error_on_warnings,
+        json: opts.json,
+    };
+    let exit_code = output::print_results(&results, elapsed, &output_opts);
     std::process::exit(exit_code);
+}
+
+/// `zplint explain <rule>`: the documentation is already curated in
+/// `docs/KNOWLEDGE.md` (problem / consequence / sources) and the README rule
+/// tables. Reading it at compile time keeps the two in lock-step without a
+/// second hand-maintained copy.
+fn explain(rule: &str) -> i32 {
+    let knowledge = include_str!("../docs/KNOWLEDGE.md");
+    let lines: Vec<&str> = knowledge.lines().collect();
+    let needle = format!("rule: {rule}");
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains(&needle) || l.contains(&format!("rules: {rule}")) || l.contains(&format!(", {rule}")))
+        .map(|(i, _)| i)
+        .collect();
+
+    for &hit in &hits {
+        let start = (0..=hit)
+            .rev()
+            .find(|&i| lines[i].trim_start().starts_with("###"))
+            .unwrap_or(hit);
+        let end = (hit + 1..lines.len())
+            .find(|&i| {
+                let t = lines[i].trim_start();
+                t.starts_with("###") || t == "---" || t.starts_with("## ")
+            })
+            .unwrap_or(lines.len());
+        let section = lines[start..end].join("\n").trim().to_string();
+        if !section.is_empty() {
+            println!("{section}\n");
+            let sev = if engine::rule_is_warning(rule) { "warning" } else { "error" };
+            println!("Rule: {rule}\nSeverity: {sev}");
+            return 0;
+        }
+    }
+
+    // Fallback: the README tables cover the original 37 detectors.
+    let readme = include_str!("../README.md");
+    if let Some(line) = readme.lines().find(|l| l.contains(&format!("`{rule}`"))) {
+        println!("{}\n", line.trim());
+        let sev = if engine::rule_is_warning(rule) { "warning" } else { "error" };
+        println!("Rule: {rule}\nSeverity: {sev}");
+        return 0;
+    }
+
+    eprintln!("Unknown rule '{rule}'. Try `zplint explain <rule-id>` with an id printed by a lint run.");
+    1
 }
 
 /// Corpus-level proof for the AST migration: how many files the parser can
