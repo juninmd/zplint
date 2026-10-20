@@ -572,6 +572,39 @@ static RE_INCLUDE_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\s*#include\s*[<"]([^>"]+)[>"]"#).unwrap());
 static RE_PRAGMA_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*#pragma\s+([A-Za-z_]\w*)").unwrap());
+// SQL injection: a `%s` in a query string (directly or via format()) without
+// SQL_QuoteString/SQL_QuoteStringFmt.
+static RE_SQL_PREPARE_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"SQL_PrepareQuery\s*\([^,]+,\s*"[^"]*%s[^"]*""#).unwrap()
+});
+static RE_FORMAT_SQL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\bformat(?:_ex)?\s*\(\s*([A-Za-z_]\w*)\s*,[^;]*"[^"]*%s[^"]*""#).unwrap()
+});
+static RE_GET_PLAYERS_FLAGS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"get_players\s*\(\s*[^,]+,\s*[^,]+,\s*"([a-i]+)""#).unwrap()
+});
+static RE_FIND_PLAYER_FLAGS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"find_player\s*\(\s*"([a-m]+)""#).unwrap()
+});
+static RE_REGISTER_EVENT_CB: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"register_event\s*\(\s*"([A-Za-z_]\w*)"\s*,\s*"([A-Za-z_]\w*)"#).unwrap()
+});
+static RE_READ_DATA_INDEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bread_data\s*\(\s*(\d+)\s*\)").unwrap());
+
+/// Event argument counts for the handful of events whose layout is stable and
+/// documented. Unknown/custom events are deliberately absent, so the rule never
+/// guesses.
+static EVENT_ARGS: &[(&str, usize)] = &[
+    ("DeathMsg", 3),
+    ("Damage", 3),
+    ("CurWeapon", 3),
+    ("StatusValue", 2),
+    ("StatusIcon", 2),
+    ("TeamInfo", 2),
+    ("SayText", 4),
+    ("TextMsg", 3),
+];
 static RE_SIZEOF_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bsizeof\s*\(?\s*([A-Za-z_]\w*)").unwrap());
 
@@ -645,11 +678,41 @@ pub const HANDLE_FAMILIES: &[(&str, &str)] = &[
     ("json_parse", "json_free"),
     ("dbi_connect", "dbi_close"),
     ("dbi_query", "dbi_free_result"),
+    // `fopen_close` owns the "never closed" case; the pair is here so the
+    // path-aware `resource_leak_on_return` can see it too.
+    ("fopen", "fclose"),
 ];
 
 /// The destructor paired with a constructor, if it is one zplint knows.
 fn handle_destructor(create: &str) -> Option<&'static str> {
     HANDLE_FAMILIES.iter().find(|(c, _)| *c == create).map(|(_, d)| *d)
+}
+
+/// True when `ident` is filled from player-controlled input in this function.
+fn is_user_controlled(body_sq: &str, ident: &str) -> bool {
+    body_sq.contains(&format!("read_args({},", ident))
+        || body_sq.contains(&format!("read_argv(1,{},", ident))
+        || Regex::new(&format!(r"get_user_name\([^,]+,{}\b", regex::escape(ident)))
+            .is_ok_and(|re| re.is_match(body_sq))
+        || Regex::new(&format!(r"get_user_authid\([^,]+,{}\b", regex::escape(ident)))
+            .is_ok_and(|re| re.is_match(body_sq))
+}
+
+/// `if (!h) return` / `if (h == 0) return` is the correct early exit after a
+/// failed allocation, not a leak path.
+fn guarded_invalid_return(line: &str, prev: &str, var: &str) -> bool {
+    let s = squash(line);
+    let p = squash(prev);
+    s.contains(&format!("if(!{})", var))
+        || s.contains(&format!("if({}==0)", var))
+        || s.contains(&format!("if({}<1)", var))
+        || s.contains(&format!("{}==Empty_Handle", var))
+        || s.contains(&format!("{}==INVALID_HANDLE", var))
+        || p.contains(&format!("if(!{})", var))
+        || p.contains(&format!("if({}==0)", var))
+        || p.contains(&format!("if({}<1)", var))
+        || p.contains(&format!("{}==Empty_Handle", var))
+        || p.contains(&format!("{}==INVALID_HANDLE", var))
 }
 
 // Dynamic handles that the plugin owns and must free (cellarray/celltrie/datapack docs:
@@ -907,6 +970,7 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
         .map(|l| strip_line_comment(l, esc))
         .collect::<Vec<_>>()
         .join("\n");
+    let raw_lines: Vec<&str> = raw_nc.lines().collect();
 
     // Shared context: brace depth per line, loop membership, function names.
     let mut depth_before: Vec<i32> = Vec::with_capacity(lines.len());
@@ -1438,6 +1502,128 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
             }
         }
 
+        // --- SQL injection ---
+        if config.enabled("sql_injection") {
+            let raw_line = raw_lines.get(i).copied().unwrap_or(line);
+            let body_sq = squash(&enclosing_body(lines, i));
+            if RE_SQL_PREPARE_LITERAL.is_match(raw_line) {
+                let user_arg = extract_call_args(san, "SQL_PrepareQuery")
+                    .first()
+                    .is_some_and(|args| {
+                        args.iter().skip(2).any(|a| {
+                            let a = a.trim();
+                            RE_IDENT_ONLY.is_match(a) && is_user_controlled(&body_sq, a)
+                        })
+                    });
+                if user_arg {
+                    issues.push(iss(
+                        lineno,
+                        "SQL_PrepareQuery() format string contains %s and a user-controlled argument - a quote breaks out of the SQL literal; quote it with SQL_QuoteString/SQL_QuoteStringFmt (SQL injection)".into(),
+                        "sql_injection",
+                        false,
+                    ));
+                }
+            } else if let Some(caps) = RE_FORMAT_SQL.captures(raw_line) {
+                let dest = caps.get(1).unwrap().as_str();
+                let body = &body_sq;
+                let sink = Regex::new(&format!(
+                    r"SQL_(?:PrepareQuery|ThreadQuery)\([^;]*\b{}\b",
+                    regex::escape(dest)
+                ))
+                .is_ok_and(|re| re.is_match(body));
+                let user_arg = extract_call_args(san, "format")
+                    .first()
+                    .is_some_and(|args| {
+                        args.iter().skip(2).any(|a| {
+                            let a = a.trim();
+                            RE_IDENT_ONLY.is_match(a) && is_user_controlled(body, a)
+                        })
+                    });
+                if sink && !body.contains("SQL_QuoteString") && user_arg {
+                    let lineno_sql = lines
+                        .iter()
+                        .enumerate()
+                        .skip(i)
+                        .find(|(_, l)| {
+                            let s = squash(l);
+                            (s.contains("SQL_PrepareQuery(") || s.contains("SQL_ThreadQuery("))
+                                && s.contains(dest)
+                        })
+                        .map(|(j, _)| j + 1)
+                        .unwrap_or(lineno);
+                    issues.push(iss(
+                        lineno_sql,
+                        "SQL query built with format()'s %s without SQL_QuoteString - user text can break out of the SQL literal (SQL injection); use SQL_QuoteString/SQL_QuoteStringFmt or a whitelist".to_string(),
+                        "sql_injection",
+                        false,
+                    ));
+                }
+            }
+        }
+
+        // --- get_players / find_player flag contracts ---
+        if config.enabled("get_players_flags")
+            && let Some(caps) = RE_GET_PLAYERS_FLAGS.captures(raw_lines.get(i).copied().unwrap_or(line))
+        {
+            let flags = caps.get(1).unwrap().as_str();
+            if flags.contains('a') && flags.contains('b') {
+                issues.push(iss(lineno, "get_players flags 'a' (exclude dead) and 'b' (exclude alive) together - no client can match, the list is always empty".into(), "get_players_flags", false));
+            }
+            if flags.contains('c') && flags.contains('d') {
+                issues.push(iss(lineno, "get_players flags 'c' (exclude bots) and 'd' (exclude humans) together - no client can match, the list is always empty".into(), "get_players_flags", false));
+            }
+            if (flags.contains('e') || flags.contains('f'))
+                && extract_call_args(san, "get_players")
+                    .first()
+                    .is_some_and(|a| a.len() < 4)
+            {
+                issues.push(iss(lineno, "get_players 'e'/'f' match against the team/name argument, but no fourth argument was passed".into(), "get_players_flags", false));
+            }
+        }
+        if config.enabled("find_player_flags")
+            && let Some(caps) = RE_FIND_PLAYER_FLAGS.captures(raw_lines.get(i).copied().unwrap_or(line))
+        {
+            let flags = caps.get(1).unwrap().as_str();
+            if flags.contains('k') && (flags.contains('a') || flags.contains('b') || flags.contains('c')) {
+                issues.push(iss(lineno, "find_player matches by userid ('k') and by name/authid ('a'/'b'/'c') at once - amxmodx.inc says this may not return a correct result".into(), "find_player_flags", false));
+            }
+            if flags.contains('f') && flags.contains('g') {
+                issues.push(iss(lineno, "find_player flags 'f' (exclude dead) and 'g' (exclude alive) together - no client can match".into(), "find_player_flags", false));
+            }
+            if flags.contains('h') && flags.contains('i') {
+                issues.push(iss(lineno, "find_player flags 'h' (exclude bots) and 'i' (exclude humans) together - no client can match".into(), "find_player_flags", false));
+            }
+        }
+
+        // --- read_data bounds ---
+        if config.enabled("read_data_bounds")
+            && let Some(caps) = RE_REGISTER_EVENT_CB.captures(raw_lines.get(i).copied().unwrap_or(line))
+        {
+            let event = caps.get(1).unwrap().as_str();
+            let cb = caps.get(2).unwrap().as_str();
+            if let Some((_, count)) = EVENT_ARGS.iter().find(|(e, _)| *e == event) {
+                let body = find_function_body_in(lines, cb);
+                if !body.is_empty() {
+                    let cb_start = lines
+                        .iter()
+                        .position(|l| l.contains(&format!("public {}", cb)))
+                        .unwrap_or(i);
+                    for m in RE_READ_DATA_INDEX.captures_iter(&body) {
+                        let idx: usize = m.get(1).unwrap().as_str().parse().unwrap_or(0);
+                        if idx == 0 || idx > *count {
+                            let line = cb_start + body[..m.get(0).unwrap().start()].matches('\n').count() + 1;
+                            issues.push(iss(
+                                line,
+                                format!("read_data({}) is out of range for {} (valid arguments are 1..{})", idx, event, count),
+                                "read_data_bounds",
+                                false,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         // --- global shadowing ---
         if config.enabled("global_shadowing") && depth_before[i] > 0
             && let Some(caps) = RE_LOCAL_NEW.captures(san) {
@@ -1555,6 +1741,7 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
         {
             let var = caps.get(1).unwrap().as_str();
             let create = caps.get(2).unwrap().as_str();
+            // `fopen_close` already owns the no-fclose-at-all case.
             let Some(destroy) = handle_destructor(create) else { continue };
             let body_sq = squash(&enclosing_body(lines, i));
             // `return h` / `f(x, h)` hand the handle to the caller or to another container -
@@ -1567,8 +1754,57 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                 || body_sq.contains(&format!(",{})", var))
                 || body_sq.contains(&format!(",{},", var))
                 || assigned_out;
-            if !body_sq.contains(&format!("{}({})", destroy, var)) && !escapes {
+            if create != "fopen"
+                && !body_sq.contains(&format!("{}({})", destroy, var))
+                && !escapes
+            {
                 issues.push(iss(lineno, format!("{}() handle '{}' is never freed with {}({}) in this function - the plugin leaks memory on every call", create, var, destroy, var), "handle_leak", false));
+            }
+        }
+
+        // A handle freed on the straight-line path but leaked on an early
+        // `return` is invisible to `handle_leak` (which only asks whether the
+        // destroy exists at all). This is the path-aware companion: a return
+        // before the destroy, unless it is the canonical invalid-handle guard
+        // (`if (!h) return`).
+        if config.enabled("resource_leak_on_return") && depth_before[i] > 0
+            && let Some(caps) = RE_HANDLE_NEW.captures(san)
+        {
+            let var = caps.get(1).unwrap().as_str();
+            let destroy = handle_destructor(caps.get(2).unwrap().as_str());
+            if let Some(destroy) = destroy {
+                let base_depth = depth_before[i];
+                for j in i + 1..sanitized.len() {
+                    if depth_before[j] < base_depth { break; }
+                    let later = &sanitized[j].0;
+                    if squash(later).contains(&format!("{}({})", destroy, var)) { break; }
+                    let lt = later.trim_start().trim_start_matches(['}', ' ', '\t']);
+                    if !lt.contains("return") { continue; }
+                    let prev = sanitized[..j]
+                        .iter()
+                        .rev()
+                        .map(|(s, _)| s.as_str())
+                        .find(|s| !s.trim().is_empty() && s.trim() != "{")
+                        .unwrap_or("");
+                    // A previous-line guard only explains a bare `return`; an
+                    // `if (cond) return` carries its own condition.
+                    let guard_prev = if lt.starts_with("return") { prev } else { "" };
+                    if guarded_invalid_return(later, guard_prev, var) { continue; }
+                    // SQL failure branches (`if (sql == Empty_Handle)`) commonly
+                    // fall back to a file without freeing the handles; treat the
+                    // whole failure path as intentional rather than a leak.
+                    let prefix = squash(&lines[..j].join("\n"));
+                    if prefix.contains("==Empty_Handle") || prefix.contains("==INVALID_HANDLE") {
+                        continue;
+                    }
+                    issues.push(iss(
+                        j + 1,
+                        format!("{}() handle '{}' is freed later, but this return leaves the function before {}({}) - the handle leaks on this path", caps.get(2).unwrap().as_str(), var, destroy, var),
+                        "resource_leak_on_return",
+                        false,
+                    ));
+                    break;
+                }
             }
         }
 
@@ -2585,6 +2821,46 @@ mod tests {
     }
 
     #[test]
+    fn read_data_bounds_check() {
+        let r = lint_str(
+            "rdb1",
+            "public plugin_init() {\n\tregister_event(\"DeathMsg\", \"event_death\", \"a\")\n}\npublic event_death() {\n\tnew x = read_data(4)\n}\n",
+        );
+        assert!(r.contains(&"read_data_bounds"));
+        let ok = lint_str(
+            "rdb2",
+            "public plugin_init() {\n\tregister_event(\"DeathMsg\", \"event_death\", \"a\")\n}\npublic event_death() {\n\tnew x = read_data(3)\n}\n",
+        );
+        assert!(!ok.contains(&"read_data_bounds"));
+    }
+
+    #[test]
+    fn player_flag_conflicts() {
+        let r = lint_str("gpf1", "public f() {\n\tnew p[32], n\n\tget_players(p, n, \"ab\")\n}\n");
+        assert!(r.contains(&"get_players_flags"));
+        let ok = lint_str("gpf2", "public f() {\n\tnew p[32], n\n\tget_players(p, n, \"a\")\n}\n");
+        assert!(!ok.contains(&"get_players_flags"));
+        let r2 = lint_str("fpf1", "public f() {\n\tfind_player(\"ka\")\n}\n");
+        assert!(r2.contains(&"find_player_flags"));
+        let ok2 = lint_str("fpf2", "public f() {\n\tfind_player(\"k\", 1)\n}\n");
+        assert!(!ok2.contains(&"find_player_flags"));
+    }
+
+    #[test]
+    fn sql_injection_rule() {
+        let r = lint_str(
+            "sqlinj1",
+            "public f(id) {\n\tnew q[256], n[32]\n\tget_user_name(id, n, charsmax(n))\n\tformat(q, charsmax(q), \"SELECT '%s'\", n)\n\tSQL_ThreadQuery(g_t, \"h\", q)\n}\n",
+        );
+        assert!(r.contains(&"sql_injection"));
+        let ok = lint_str(
+            "sqlinj2",
+            "public f(id) {\n\tnew q[256], n[32]\n\tget_user_name(id, n, charsmax(n))\n\tSQL_QuoteString(g_db, q, charsmax(q), n)\n\tSQL_ThreadQuery(g_t, \"h\", q)\n}\n",
+        );
+        assert!(!ok.contains(&"sql_injection"));
+    }
+
+    #[test]
     fn format_injection_rule() {
         let r = lint_str("fmtinj", "public f(id) {\n\tnew said[192];\n\tread_args(said, charsmax(said));\n\tclient_print(0, print_chat, said);\n}\n");
         assert!(r.contains(&"format_injection"));
@@ -2941,6 +3217,20 @@ mod tests {
         // ownership handed to a global is not a leak in this function
         let escaped = lint_str("hl5", "new Handle:g_db;\npublic f() {\n\tnew Handle:h = SQL_Connect(t, e, err, 255);\n\tg_db = h;\n}\n");
         assert!(!escaped.contains(&"handle_leak"));
+    }
+
+    #[test]
+    fn resource_leak_on_early_return() {
+        let r = lint_str(
+            "pathleak",
+            "public f(cond) {\n\tnew h = fopen(\"x\", \"r\")\n\tif (!h) return\n\tif (cond) return\n\tfclose(h)\n}\n",
+        );
+        assert!(r.contains(&"resource_leak_on_return"));
+        let ok = lint_str(
+            "pathleakok",
+            "public f() {\n\tnew h = fopen(\"x\", \"r\")\n\tif (!h) return\n\tfclose(h)\n}\n",
+        );
+        assert!(!ok.contains(&"resource_leak_on_return"));
     }
 
     #[test]

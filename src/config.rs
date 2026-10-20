@@ -82,11 +82,11 @@ impl RulesConfig {
     /// have a legacy boolean field, while the final pass in `lint_file` filters
     /// every rule id through both.
     pub fn selected(&self, rule_id: &str) -> bool {
-        let skip = self.skip.iter().any(|s| s == "all" || s == rule_id);
+        let skip = self.skip.iter().any(|s| selector_matches(s, rule_id));
         if skip {
             return false;
         }
-        self.only.is_empty() || self.only.iter().any(|o| o == "all" || o == rule_id)
+        self.only.is_empty() || self.only.iter().any(|o| selector_matches(o, rule_id))
     }
 }
 
@@ -139,6 +139,16 @@ impl Default for RulesConfig {
             ast: true,
         }
     }
+}
+
+/// `--only`/`--skip` selector: exact id, `all`, a category (`correctness`,
+/// `suspicious`, `performance`, `security`, `style`) or `recommended`.
+fn selector_matches(sel: &str, rule_id: &str) -> bool {
+    sel == "all"
+        || sel == rule_id
+        || (sel == "recommended" && crate::rule_meta::recommended(rule_id))
+        || crate::rule_meta::Category::from_str(sel)
+            .is_some_and(|c| c == crate::rule_meta::category(rule_id))
 }
 
 fn default_paths() -> Vec<String> { vec!["meus_plugins_organizados".to_string()] }

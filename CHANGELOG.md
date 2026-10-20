@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **P0/P1 Biome parity**: AST semantic pass (`src/sema_lint.rs`) with
+  `unused_symbol` (203), `write_only_symbol` (204), `use_before_init` (210) and
+  `unintended_bitwise` (212); rule categories + `--only=correctness` /
+  `--skip=style` / `recommended`; `zplint rules [--json]`; safe/unsafe fixes
+  (`zplint fix`, `zplint fix --unsafe-fixes`); `zplint ci` with
+  `--changed`/`--since`/`--staged`; `sql_injection`; path-aware
+  `resource_leak_on_return`; `get_players_flags`/`find_player_flags`;
+  `read_data_bounds`.
+- **Formatter (`zplint fmt`)**: brace-depth indentation including braceless
+  control bodies, trailing-whitespace cleanup, blank-line collapsing and a
+  contiguous leading `#include` sort with `<amxmodx>` first. `--check` and
+  `--write`, idempotent, conservative around comments/continuations.
+- **LSP (`zplint lsp`)**: JSON-RPC over stdio with full-document sync,
+  diagnostics, hover for AMXX natives/constants, `zplint-ignore` quick fixes and
+  document formatting.
+- **Reporters**: `--reporter default|json|github|sarif|junit` (the old `--json`
+  remains an alias for `--reporter=json`).
+
+### Added
 - **Biome-parity workflow**: comment suppressions (`// zplint-ignore`,
   `-next-line`, `-file`, optional rule list, `-- reason`), `--only`/`--skip`
   rule filtering, `--error-on-warnings`, `--max-diagnostics`, a `--json`

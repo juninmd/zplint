@@ -6,13 +6,40 @@ pub enum Severity {
     Warning,
 }
 
+/// What `zplint fix` may do with a diagnostic, mirroring Biome's safe/unsafe
+/// split: safe fixes preserve semantics, unsafe fixes need review.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FixSafety {
+    None,
+    Safe,
+    Unsafe,
+}
+
+impl FixSafety {
+    pub fn is_some(self) -> bool {
+        self != FixSafety::None
+    }
+
+    pub fn is_safe(self) -> bool {
+        self == FixSafety::Safe
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FixSafety::None => "none",
+            FixSafety::Safe => "safe",
+            FixSafety::Unsafe => "unsafe",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LintIssue {
     pub lineno: usize,
     pub message: String,
     pub rule_id: &'static str,
     pub severity: Severity,
-    pub auto_fixable: bool,
+    pub fix: FixSafety,
 }
 
 pub static STOCK_SOUND_DIRS: &[&str] = &[

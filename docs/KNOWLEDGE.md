@@ -991,3 +991,90 @@ bundled includes, so the check stays exact.
 Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/dodstats.inc ·
 https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/tfcstats.inc ·
 https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/tsstats.inc
+
+### 10.9 Compiler warnings 203/204/210/212 from the AST `[rules: unused_symbol, write_only_symbol, use_before_init, unintended_bitwise]`
+`sc5-in.scp` defines four warnings that a line regex cannot answer correctly because they
+depend on scope and on the order of statements:
+- **203** `symbol is never used` - a local or global that is declared and never read.
+- **204** `symbol is assigned a value that is never used` - written but never read.
+- **210** `possible use of symbol before initialization` - a scalar read before its first
+  assignment. Pawn does not zero local scalars (arrays are zeroed), so the read is garbage.
+- **212** `possibly unintended bitwise operation` - `&`/`|` between two expressions that are
+  already boolean, usually a typo for `&&`/`||`.
+`src/sema_lint.rs` walks the `zpc_ast::Program` with `zpc_sema::SymbolTable` (203/204) and a
+small scope tracker (210/212). Public/stock/native symbols and parameters are exempt, enum
+members are READ-exempt, and an uninitialized scalar passed to a by-reference/array parameter
+is treated as a write (`get_user_ping(id, ping, loss)`). The conservative trade-off is a false
+negative for branch-dependent initialization, never a false positive in the common callback
+shape. Official plugins: 0 errors, 13 genuine `use_before_init` warnings (e.g. `admin.sma`'s
+`new dots, chars` read in the loop test).
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp ·
+https://www.compuphase.com/pawn/pawnfeatures.htm
+
+### 10.10 SQL injection `[rule: sql_injection]`
+`SQL_PrepareQuery` takes a format string and `SQL_ThreadQuery` takes a finished query. AMXX
+has no bound parameters, so a `%s` fed from player input must be quoted with
+`SQL_QuoteString`/`SQL_QuoteStringFmt`; otherwise a `'` in a name/authid breaks out of the SQL
+literal. Detection only fires when the `%s` argument is user-controlled in the same function
+(`read_args`, `read_argv`, `get_user_name`, `get_user_authid`), and stays quiet when
+`SQL_QuoteString` appears. This keeps the rule off canonical code that formats admin cvars
+and DB values. Warning.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/sqlx.inc ·
+https://www.amxmodx.org/api/sqlx/SQL_QuoteString
+
+### 10.11 `get_players` / `find_player` flag contracts `[rules: get_players_flags, find_player_flags]`
+`amxmodx.inc` documents the flag letters:
+- `get_players`: `a` excludes dead, `b` excludes alive; `c` excludes bots, `d` excludes humans;
+  `e`/`f` match against the fourth (team/name) argument.
+- `find_player`: `k` matches by userid, and the doc explicitly says not to combine `k` with
+  `a`/`b`/`c` (name/name-substring/authid); `f`/`g` and `h`/`i` are the dead/alive and
+  bot/human exclusions.
+Contradictory pairs produce an always-empty list or an unreliable match. Detection is limited
+to literal flag strings. Warning.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/amxmodx.inc ·
+https://www.amxmodx.org/api/amxmodx/get_players
+
+### 10.12 `read_data` bounds `[rule: read_data_bounds]`
+`read_data` is 1-based. For the events whose argument layout is stable across mods
+(`DeathMsg` 3, `Damage` 3, `CurWeapon` 3, `StatusValue` 2, `StatusIcon` 2, `TeamInfo` 2,
+`SayText` 4, `TextMsg` 3), an index outside `1..N` reads a non-existent argument. The rule
+resolves the `register_event` callback and checks the callback body. Custom/unknown events and
+mod-specific layouts (`ScoreInfo` differs on NS) are deliberately absent, so the rule never
+guesses. Warning.
+Sources: https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/amxmodx.inc ·
+https://wiki.alliedmods.net/Events_(AMX_Mod_X)
+
+### 10.13 Path-aware handle leak `[rule: resource_leak_on_return]`
+`handle_leak` asks "is there a destroy anywhere in the function?". That misses a handle freed
+on the normal path but leaked on an early `return`. This rule walks from the constructor to the
+first destructor and reports a `return` in between, unless it is the canonical failed-allocation
+guard (`if (!h) return`, `if (h == 0)`, `if (h == Empty_Handle)` / `INVALID_HANDLE`) or a SQL
+failure fallback. It covers the same constructor table as `handle_leak` (including `fopen`,
+whose no-close-at-all case belongs to `fopen_close`). Warning.
+Sources: https://www.amxmodx.org/api/file/fopen ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/cellarray.inc
+
+### 10.14 Tooling: groups, safe/unsafe fixes, CI, formatter, LSP, reporters
+The Biome-parity tooling shipped alongside these rules:
+- `--only`/`--skip` accept an id, `all`, `recommended`, or a category
+  (`correctness`, `suspicious`, `performance`, `security`, `style`).
+- `zplint rules [--json]` lists every documented rule with category, severity and description.
+- `FixSafety::{None,Safe,Unsafe}` replaces the boolean fix flag. `zplint fix` applies safe
+  fixes; `zplint fix --unsafe-fixes` also applies the ZP `if (x)` narrowing.
+- `zplint ci` is read-only and fails on warnings; `--changed [--since REV]` and `--staged`
+  select Git files.
+- `zplint fmt [--check|--write]` indents from brace depth (including braceless bodies),
+  trims trailing whitespace, collapses blank-line runs and sorts a contiguous leading
+  `#include` block with `<amxmodx>` first.
+- `zplint lsp` speaks JSON-RPC over stdio: diagnostics, hover for AMXX natives/constants,
+  suppression quick-fixes and full-document formatting.
+- `--reporter default|json|github|sarif|junit` covers terminals and CI systems.
+Sources: https://biomejs.dev/reference/cli/ · https://biomejs.dev/analyzer/suppressions/ ·
+https://microsoft.github.io/language-server-protocol/
+
+### 10.15 Deferred: `set_pdata_*` offset families
+`set_pdata_int/float/...` take a raw HLSDK byte offset whose real type depends on the game
+binary and platform; the bundled includes do not ship a verified offset table. A wrong-family
+detector would need a curated table per mod (CS 1.6, CZ, HL) and Windows/Linux variants, so it
+is deliberately deferred rather than guessed. The existing `entity_ev_type_mismatch` covers
+the equivalent `EV_*` family for the Engine module, where the prefix is part of the constant.

@@ -59,7 +59,11 @@ Node is required only for this regeneration step; building and running zplint ne
 | `src/main.rs` | CLI entry point (clap), rayon-parallel lint |
 | `src/config.rs` | TOML config (serde); `rules.disable` list for detectors.rs rules |
 | `src/engine.rs` | Lint engine (original 37 detectors), comment stripping, severity table |
-| `src/detectors.rs` | Research-driven detectors (58 rules, see docs/KNOWLEDGE.md) |
+| `src/detectors.rs` | Research-driven detectors (67 rules, see docs/KNOWLEDGE.md) |
+| `src/sema_lint.rs` | AST semantic rules: 203/204/210/212 via zpc-sema |
+| `src/fmt.rs` | Conservative formatter (`zplint fmt --check/--write`) |
+| `src/lsp.rs` | LSP server over stdio (diagnostics, hover, quick fixes, format) |
+| `src/rule_meta.rs` | Rule categories, recommended set, `zplint rules` |
 | `docs/BIOME_PARITY.md` | Research, Biome gap matrix and prioritized rule/tooling backlog |
 | `src/api.rs` | GENERATED: 1631 signatures + 3194 constants from the 66 bundled includes |
 | `src/api_check.rs` | Whole-API rules (arity, tags, includes, typos, forwards, enum constants) |

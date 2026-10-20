@@ -82,7 +82,24 @@ Implemented and tested in this change:
 | Cross-mod include aliases | rule fix | `csstats`/`dodstats`/`tfcstats`/`tsstats`, `csx`/`dodx`/`tfcx`/`tsx`; fixes 71 false errors on official DOD/TFC/TS plugins |
 
 Validation: 0 errors on the official plugins (excluding `plugins/testsuite`, which
-intentionally exercises invalid paths), 175 unit tests green.
+intentionally exercises invalid paths), 187 unit tests green.
+
+### 3.1 P0/P1 status
+
+| Item | Status |
+|---|---|
+| P0.1 `zpc-sema`/AST semantic pass (203/204/210/212) | done (`src/sema_lint.rs`) |
+| P0.2 rule categories, `recommended`, `zplint rules` | done (`src/rule_meta.rs`) |
+| P0.3 safe/unsafe fixes | done (`FixSafety`, `fix --unsafe-fixes`) |
+| P0.4 `ci`, `--changed`, `--staged`, `--since` | done |
+| P0.5 SQL injection | done (`sql_injection`, user-controlled args only) |
+| P1.6 formatter | done (`zplint fmt --check/--write`, conservative) |
+| P1.7 LSP | done (`zplint lsp`: diagnostics, hover, quick fixes, format) |
+| P1.8 SARIF/GitHub/JUnit reporters | done (`--reporter`) |
+| P1.9 path-aware lifecycle | done (`resource_leak_on_return`, early-return + guards) |
+| P1.10 `get_players`/`find_player` flags | done |
+| P1.11 `read_data` bounds | done for the stable event table |
+| P1.12 `set_pdata_*` offset family | deferred: no verified per-mod/platform offset table in the bundled includes; see `docs/KNOWLEDGE.md` §10.15 |
 
 ---
 

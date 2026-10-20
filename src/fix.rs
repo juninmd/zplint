@@ -2,9 +2,12 @@ use crate::config::Config;
 use crate::engine::lint_file;
 use std::path::Path;
 
-pub fn auto_fix(filepath: &Path, config: &Config, _use_color: bool) -> i32 {
+pub fn auto_fix(filepath: &Path, config: &Config, unsafe_fixes: bool, _use_color: bool) -> i32 {
     let issues = lint_file(filepath, &config.rules);
-    let fixable: Vec<_> = issues.iter().filter(|i| i.auto_fixable).collect();
+    let fixable: Vec<_> = issues
+        .iter()
+        .filter(|i| i.fix.is_safe() || (unsafe_fixes && i.fix == crate::rules::FixSafety::Unsafe))
+        .collect();
     if fixable.is_empty() { return 0; }
 
     let raw = match std::fs::read_to_string(filepath) {
@@ -33,10 +36,16 @@ pub fn auto_fix(filepath: &Path, config: &Config, _use_color: bool) -> i32 {
 }
 
 fn apply_fix(line: &str, issue: &crate::rules::LintIssue) -> Option<String> {
-    let re_line = regex::Regex::new(r"^(\s*)if\s*\(\s*(\w+)\s*\)\s*$").unwrap();
+    let re_line = regex::Regex::new(r"^(\s*)if\s*\(\s*(\w+)\s*\)\s*(\{)?\s*$").unwrap();
     if (issue.rule_id == "zp_gamemode_if" || issue.rule_id == "zp_class_if")
         && let Some(caps) = re_line.captures(line) {
-        return Some(format!("{}if ({} > 0)", caps.get(1).unwrap().as_str(), caps.get(2).unwrap().as_str()));
+        let brace = if caps.get(3).is_some() { " {" } else { "" };
+        return Some(format!(
+            "{}if ({} > 0){}",
+            caps.get(1).unwrap().as_str(),
+            caps.get(2).unwrap().as_str(),
+            brace
+        ));
     }
     if issue.rule_id == "buffer_size" {
         let re = regex::Regex::new(r"\b(get_user_name|get_user_authid|get_user_ip|get_user_team)\s*\(([^,]+),\s*(\w+),\s*(\d+)").unwrap();

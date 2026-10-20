@@ -74,7 +74,12 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         },
         Err(_) => return vec![],
     };
+    lint_source(filepath, &raw, config)
+}
 
+/// Lint an in-memory source. The LSP path uses this so unsaved editor buffers
+/// are linted without touching disk.
+pub fn lint_source(filepath: &std::path::Path, raw: &str, config: &RulesConfig) -> Vec<LintIssue> {
     // AST path first: if the file parses through the zpc front-end, the migrated
     // rules are answered from the parse tree and suppressed in the regex pass
     // below. A file that does not parse silently keeps the regex behaviour, so a
@@ -82,7 +87,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
     let mut ast_issues = Vec::new();
     let ast_config;
     let config = if config.ast
-        && let Some(found) = crate::ast_lint::lint(filepath, &raw, config)
+        && let Some(found) = crate::ast_lint::lint(filepath, raw, config)
     {
         ast_issues = found;
         let mut narrowed = config.clone();
@@ -95,7 +100,7 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
         config
     };
 
-    let raw_clean = strip_block_comments(&raw);
+    let raw_clean = strip_block_comments(raw);
     let lines_clean: Vec<&str> = raw_clean.split('\n').collect();
     // Registration callbacks live in quoted strings: strip `//` comments but
     // keep literals, so a commented-out `register_clcmd("x", "cb")` example is
@@ -216,7 +221,16 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
             && let Some(var) = RE_GAMEMODE.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
             let body = squash(&enclosing_body(&lines_clean, i));
             if body.contains(&format!("if({})", var)) && !body.contains(&format!("if({}>0)", var)) {
-                issues.push(iss(lineno, format!("if ({}) should be if ({} > 0) - gamemode can return -2 (ZP_NO_GAME_MODE)", var, var), "zp_gamemode_if", true));
+                // Report the `if`, not the declaration: the fixer rewrites this
+                // line, and the user should see the line that changes.
+                let if_lineno = lines_clean
+                    .iter()
+                    .enumerate()
+                    .skip(i)
+                    .find(|(_, l)| squash(l).contains(&format!("if({})", var)))
+                    .map(|(j, _)| j + 1)
+                    .unwrap_or(lineno);
+                issues.push(iss(if_lineno, format!("if ({}) should be if ({} > 0) - gamemode can return -2 (ZP_NO_GAME_MODE)", var, var), "zp_gamemode_if", true));
             }
         }
 
@@ -225,7 +239,14 @@ pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIs
                 if let Some(var) = re_fn.captures(stripped).map(|c| c.get(1).unwrap().as_str().to_string()) {
                     let body = squash(&enclosing_body(&lines_clean, i));
                     if body.contains(&format!("if({})", var)) && !body.contains(&format!("if({}>0)", var)) {
-                        issues.push(iss(lineno, format!("if ({}) should be if ({} > 0) - class ID can return -1 (ZP_NO_CLASS)", var, var), "zp_class_if", true));
+                        let if_lineno = lines_clean
+                            .iter()
+                            .enumerate()
+                            .skip(i)
+                            .find(|(_, l)| squash(l).contains(&format!("if({})", var)))
+                            .map(|(j, _)| j + 1)
+                            .unwrap_or(lineno);
+                        issues.push(iss(if_lineno, format!("if ({}) should be if ({} > 0) - class ID can return -1 (ZP_NO_CLASS)", var, var), "zp_class_if", true));
                     }
                 }
             }
@@ -759,6 +780,16 @@ static WARNING_RULES: &[&str] = &[
     "duplicate_include",
     "unknown_pragma",
     "sizeof_scalar",
+    // sema_lint.rs: compiler warnings 203/204/210/212
+    "unused_symbol",
+    "write_only_symbol",
+    "use_before_init",
+    "unintended_bitwise",
+    "sql_injection",
+    "resource_leak_on_return",
+    "get_players_flags",
+    "find_player_flags",
+    "read_data_bounds",
 ];
 
 /// True when `rule_id` is deliberately a warning (style/perf/contract smell)
@@ -769,7 +800,16 @@ pub fn rule_is_warning(rule_id: &str) -> bool {
 
 pub(crate) fn iss(lineno: usize, message: String, rule_id: &'static str, fixable: bool) -> LintIssue {
     let severity = if WARNING_RULES.contains(&rule_id) { Severity::Warning } else { Severity::Error };
-    LintIssue { lineno, message, rule_id, severity, auto_fixable: fixable }
+    let fix = if !fixable {
+        FixSafety::None
+    } else if matches!(rule_id, "zp_gamemode_if" | "zp_class_if") {
+        // These rewrite `if (mode)` to `if (mode > 0)`: correct for ZP, but a
+        // semantic narrowing, so they are not applied without `--unsafe`.
+        FixSafety::Unsafe
+    } else {
+        FixSafety::Safe
+    };
+    LintIssue { lineno, message, rule_id, severity, fix }
 }
 
 /// Remove /* */ comments, preserving line structure. Unlike a plain regex this
@@ -1761,7 +1801,7 @@ public cmd_say(id) {
         let issues = lint_file(&path, &RulesConfig::default());
         let hits: Vec<_> = issues.iter().filter(|i| i.rule_id == "sizeof_string_len").collect();
         assert_eq!(hits.len(), 2);
-        assert!(hits.iter().all(|i| i.auto_fixable));
+        assert!(hits.iter().all(|i| i.fix.is_some()));
         std::fs::remove_file(path).unwrap();
     }
 

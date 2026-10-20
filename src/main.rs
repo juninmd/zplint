@@ -8,8 +8,12 @@ mod disasm_cmd;
 mod discover;
 mod engine;
 mod fix;
+mod fmt;
+mod lsp;
 mod output;
+mod rule_meta;
 mod rules;
+mod sema_lint;
 mod watch;
 
 use clap::Parser;
@@ -47,20 +51,74 @@ enum Command {
         /// Print at most N diagnostics (0 = unlimited)
         #[arg(long, default_value_t = 0, value_name = "N")]
         max_diagnostics: usize,
-        /// Machine-readable JSON report
+        /// Machine-readable JSON report (alias for --reporter=json)
         #[arg(long)]
         json: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = output::Reporter::Default)]
+        reporter: output::Reporter,
+        /// Lint only files changed relative to HEAD (or --since)
+        #[arg(long, conflicts_with = "staged")]
+        changed: bool,
+        /// Lint only files staged for the next commit
+        #[arg(long)]
+        staged: bool,
+        /// Base revision for --changed (default: HEAD)
+        #[arg(long, value_name = "REV", requires = "changed")]
+        since: Option<String>,
+    },
+    /// Language Server Protocol over stdio (diagnostics, hover, quick fixes)
+    Lsp,
+    /// Format .sma files (indentation, include order, whitespace)
+    Fmt {
+        files: Vec<PathBuf>,
+        /// Only check; exit 1 when a file would change
+        #[arg(long)]
+        check: bool,
+        /// Write the formatted result
+        #[arg(long)]
+        write: bool,
+    },
+    /// CI mode: read-only, warnings fail the run
+    Ci {
+        files: Vec<PathBuf>,
+        #[arg(long, value_name = "RULE", value_delimiter = ',')]
+        only: Vec<String>,
+        #[arg(long, value_name = "RULE", value_delimiter = ',')]
+        skip: Vec<String>,
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        max_diagnostics: usize,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_enum, default_value_t = output::Reporter::Default)]
+        reporter: output::Reporter,
+        #[arg(long, conflicts_with = "staged")]
+        changed: bool,
+        #[arg(long)]
+        staged: bool,
+        #[arg(long, value_name = "REV", requires = "changed")]
+        since: Option<String>,
     },
     /// Print the documentation entry for a rule id
     Explain {
         /// Rule id, e.g. `handle_leak`
         rule: String,
     },
+    /// List every rule with its category, severity and description
+    Rules {
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Watch mode: re-lint on file changes
     Watch,
-    /// Apply auto-fixes
+    /// Apply auto-fixes (safe fixes by default)
     Fix {
         files: Vec<PathBuf>,
+        /// Also apply fixes that change semantics (currently the ZP mode/class
+        /// `if (x)` -> `if (x > 0)` rewrites)
+        #[arg(long)]
+        unsafe_fixes: bool,
     },
     /// Compile a .sma plugin to .amxx
     Compile {
@@ -100,14 +158,77 @@ fn main() {
         Some(Command::Watch) => {
             watch::start_watch(&root, &cfg);
         }
-        Some(Command::Fix { files }) => {
-            run_fix(&root, &cfg, files);
+        Some(Command::Fix { files, unsafe_fixes }) => {
+            run_fix(&root, &cfg, files, unsafe_fixes);
         }
-        Some(Command::Lint { files, only, skip, error_on_warnings, max_diagnostics, json }) => {
-            run_lint(&root, &cfg, files, LintOptions { only, skip, error_on_warnings, max_diagnostics, json });
+        Some(Command::Lint {
+            files,
+            only,
+            skip,
+            error_on_warnings,
+            max_diagnostics,
+            json,
+            reporter,
+            changed,
+            staged,
+            since,
+        }) => {
+            run_lint(
+                &root,
+                &cfg,
+                files,
+                LintOptions {
+                    only,
+                    skip,
+                    error_on_warnings,
+                    max_diagnostics,
+                    reporter: if json { output::Reporter::Json } else { reporter },
+                    changed,
+                    staged,
+                    since,
+                    ci: false,
+                },
+            );
+        }
+        Some(Command::Lsp) => {
+            std::process::exit(lsp::run(&cfg));
+        }
+        Some(Command::Fmt { files, check, write }) => {
+            std::process::exit(fmt::run(&root, &cfg, files, check, write));
+        }
+        Some(Command::Ci {
+            files,
+            only,
+            skip,
+            max_diagnostics,
+            json,
+            reporter,
+            changed,
+            staged,
+            since,
+        }) => {
+            run_lint(
+                &root,
+                &cfg,
+                files,
+                LintOptions {
+                    only,
+                    skip,
+                    error_on_warnings: true,
+                    max_diagnostics,
+                    reporter: if json { output::Reporter::Json } else { reporter },
+                    changed,
+                    staged,
+                    since,
+                    ci: true,
+                },
+            );
         }
         Some(Command::Explain { rule }) => {
             std::process::exit(explain(&rule));
+        }
+        Some(Command::Rules { json }) => {
+            std::process::exit(list_rules(json));
         }
         Some(Command::Compile { file, output, includes, emit_asm }) => {
             std::process::exit(compile_cmd::run(&file, output, includes, emit_asm));
@@ -130,16 +251,27 @@ struct LintOptions {
     skip: Vec<String>,
     error_on_warnings: bool,
     max_diagnostics: usize,
-    json: bool,
+    reporter: output::Reporter,
+    changed: bool,
+    staged: bool,
+    since: Option<String>,
+    ci: bool,
 }
 
 fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, opts: LintOptions) {
     let mut cfg = cfg.clone();
     cfg.rules.only = opts.only;
     cfg.rules.skip = opts.skip;
+    if opts.ci {
+        cfg.output.color = false;
+    }
     let cfg = &cfg;
 
-    let sma_files = if files.is_empty() {
+    let sma_files = if opts.staged {
+        discover::staged_files(root, &cfg.exclude)
+    } else if opts.changed {
+        discover::changed_files(root, opts.since.as_deref(), &cfg.exclude)
+    } else if files.is_empty() {
         discover::discover_files(root, &cfg.paths, &cfg.exclude)
     } else {
         discover::resolve_input_files(root, &files, &cfg.exclude)
@@ -164,7 +296,7 @@ fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, o
         color: cfg.output.color,
         max_diagnostics: opts.max_diagnostics,
         error_on_warnings: opts.error_on_warnings,
-        json: opts.json,
+        reporter: opts.reporter,
     };
     let exit_code = output::print_results(&results, elapsed, &output_opts);
     std::process::exit(exit_code);
@@ -174,6 +306,41 @@ fn run_lint(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, o
 /// `docs/KNOWLEDGE.md` (problem / consequence / sources) and the README rule
 /// tables. Reading it at compile time keeps the two in lock-step without a
 /// second hand-maintained copy.
+fn list_rules(json: bool) -> i32 {
+    let ids = rule_meta::all_rule_ids();
+    if json {
+        let mut out = String::from("{\"rules\":[");
+        for (i, id) in ids.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let desc = rule_meta::description(id).unwrap_or_default();
+            out.push_str(&format!(
+                "{{\"id\":\"{}\",\"category\":\"{}\",\"severity\":\"{}\",\"recommended\":{},\"description\":\"{}\"}}",
+                output::json_escape(id),
+                rule_meta::category(id).as_str(),
+                rule_meta::severity(id),
+                rule_meta::recommended(id),
+                output::json_escape(&desc),
+            ));
+        }
+        out.push_str("]}");
+        println!("{out}");
+    } else {
+        for id in &ids {
+            let desc = rule_meta::description(id).unwrap_or_default();
+            println!(
+                "{:<34} {:<12} {:<8} {}",
+                id,
+                rule_meta::category(id).as_str(),
+                rule_meta::severity(id),
+                desc
+            );
+        }
+    }
+    0
+}
+
 fn explain(rule: &str) -> i32 {
     let knowledge = include_str!("../docs/KNOWLEDGE.md");
     let lines: Vec<&str> = knowledge.lines().collect();
@@ -252,7 +419,7 @@ fn run_ast_compare(root: &std::path::Path, cfg: &config::Config, files: Vec<Path
     0
 }
 
-fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
+fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, unsafe_fixes: bool) {
     let sma_files = if files.is_empty() {
         discover::discover_files(root, &cfg.paths, &cfg.exclude)
     } else {
@@ -266,7 +433,7 @@ fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>) {
 
     let mut total = 0i32;
     for f in &sma_files {
-        let fixes = fix::auto_fix(f, cfg, cfg.output.color);
+        let fixes = fix::auto_fix(f, cfg, unsafe_fixes, cfg.output.color);
         if fixes > 0 {
             total += fixes;
             let rel = f.strip_prefix(root).unwrap_or(f);

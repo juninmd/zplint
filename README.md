@@ -6,7 +6,7 @@
 [![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#install)
 
 Lightning-fast linter for **Pawn / AMX Mod X** plugins (CS 1.6), with deep **Zombie Plague 5.0** support.  
-Scans `.sma` files for **111 detectors**: compile errors before you compile, runtime-crash patterns
+Scans `.sma` files for **150+ detectors**: compile errors before you compile, runtime-crash patterns
 (HLDS `svc_bad` / segfault / run time errors 3/4/10/11), engine limits (precache/edicts/netchan),
 tag-mismatch bugs, and ZP50 API contract violations.
 
@@ -55,6 +55,24 @@ zplint lint --json --max-diagnostics 0
 zplint lint --only handle_leak,menu_handler_handled
 zplint lint --skip get_cvar_hotpath,deprecated_symbols
 zplint lint --error-on-warnings
+```
+
+### Biome-style workflow
+
+```bash
+zplint rules                       # list ids, category, severity, description
+zplint rules --json
+zplint lint --only=style           # category selector
+zplint lint --skip=performance
+zplint lint --reporter=github      # default | json | github | sarif | junit
+zplint ci                          # read-only, warnings fail
+zplint ci --changed --since=main   # only files changed since main
+zplint ci --staged                 # only staged files
+zplint fix                         # safe fixes only
+zplint fix --unsafe-fixes          # include semantic narrowing fixes
+zplint fmt --check                 # verify formatting
+zplint fmt --write                 # indentation, include order, whitespace
+zplint lsp                         # diagnostics, hover, quick fixes, format
 ```
 
 ### Suppressions
@@ -110,7 +128,7 @@ parity. Runtime reference and zplint artifacts both emit `ZPLINT_RUNTIME_PASS`.
 Generated code is not byte-identical to `amxxpc`; production rollout should still
 start as a canary and keep the runtime gate mandatory.
 
-## Rules (111 detectors)
+## Rules (150+ detectors)
 
 ### Player Validation (8)
 | Rule | Severity | Fix | Description |
@@ -169,7 +187,7 @@ start as a canary and keep the runtime gate mandatory.
 | `client_cmd_spk` | warning | ❌ | client_cmd(0, "spk...") instead of emit_sound |
 | `hardcoded_maxplayers` | warning | ❌ | loop uses `#define MAXPLAYERS 32` as runtime player count |
 
-## Research-driven detectors (74)
+## Research-driven detectors
 
 Added from internet research of real compile errors, crash reports and API docs
 (sources in [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md)). All are on by default; turn any off
@@ -270,6 +288,23 @@ via `rules.disable` (see Config).
 | `zp50_get_in_init` | warning | zp50 query natives in plugin_init ("Invalid Array Handle" load-order bug) |
 | `zp43_mixing` | warning | ZP 4.3 API (`<zombieplague>`) mixed with zp50 includes |
 
+### Semantic warnings (4)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `unused_symbol` | warning | Local/global declared but never read (amxxpc warning 203) |
+| `write_only_symbol` | warning | Assigned but never read (warning 204) |
+| `use_before_init` | warning | Scalar read before its first assignment (warning 210; Pawn does not zero scalars) |
+| `unintended_bitwise` | warning | `&`/`|` between two boolean expressions (warning 212) |
+
+### Security & player contracts (5)
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `sql_injection` | warning | User-controlled `%s` in `SQL_PrepareQuery`/`SQL_ThreadQuery` without `SQL_QuoteString` |
+| `resource_leak_on_return` | warning | Handle freed later but leaked by an early `return` (path-aware) |
+| `get_players_flags` | warning | Contradictory `get_players` flags (`ab`, `cd`) or `e`/`f` without the team/name argument |
+| `find_player_flags` | warning | `find_player` userid match (`k`) combined with name/authid flags |
+| `read_data_bounds` | warning | `read_data(N)` outside the event's argument range |
+
 ### Contracts, includes & tooling (5)
 
 | Rule | Severity | Description |
@@ -336,3 +371,5 @@ engineering rules that keep GPL code out of this repository are in
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
 in this work shall be licensed as above, without any additional terms or conditions.
+
+

@@ -36,6 +36,52 @@ fn push_sma_files(root: &Path, base: &Path, exclude: &[String], files: &mut Vec<
     }
 }
 
+/// Files changed in the working tree (and staged) relative to `since`
+/// (default `HEAD`), plus untracked files. Used by `--changed`.
+pub fn changed_files(root: &Path, since: Option<&str>, exclude: &[String]) -> Vec<PathBuf> {
+    let base = since.unwrap_or("HEAD");
+    let mut out = git_names(root, &["diff", "--name-only", "--diff-filter=ACMR", base]);
+    out.extend(git_names(root, &["ls-files", "--others", "--exclude-standard"]));
+    filter_sma(root, out, exclude)
+}
+
+/// Files staged for the next commit. Used by `--staged`.
+pub fn staged_files(root: &Path, exclude: &[String]) -> Vec<PathBuf> {
+    let out = git_names(root, &["diff", "--cached", "--name-only", "--diff-filter=ACMR"]);
+    filter_sma(root, out, exclude)
+}
+
+fn git_names(root: &Path, args: &[&str]) -> Vec<PathBuf> {
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| root.join(l))
+        .collect()
+}
+
+fn filter_sma(root: &Path, paths: Vec<PathBuf>, exclude: &[String]) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = paths
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "sma"))
+        .filter(|p| !is_excluded(root, p, exclude))
+        .collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
 fn is_excluded(root: &Path, path: &Path, exclude: &[String]) -> bool {
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
     exclude.iter().any(|e| rel.contains(e))
