@@ -24,6 +24,14 @@ a 542-file real-world ZP plugin collection.
 
 Requires Rust **1.88+** (edition 2024).
 
+Prebuilt binaries (Linux x86_64, Windows x86_64, macOS arm64) are attached to every
+[GitHub release](https://github.com/juninmd/zplint/releases). Once installed, keep it current with:
+
+```bash
+zplint self-update           # download, verify SHA-256 and replace the running binary
+zplint self-update --check   # exit 1 when a newer release exists
+```
+
 From crates.io:
 
 ```bash

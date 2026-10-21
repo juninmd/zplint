@@ -14,6 +14,7 @@ mod output;
 mod rule_meta;
 mod rules;
 mod sema_lint;
+mod self_update;
 mod watch;
 
 use clap::Parser;
@@ -112,6 +113,15 @@ enum Command {
     },
     /// Watch mode: re-lint on file changes
     Watch,
+    /// Update zplint to the latest GitHub release
+    SelfUpdate {
+        /// Only check; exit 1 when a newer release exists
+        #[arg(long)]
+        check: bool,
+        /// Install this exact version instead of the latest (allows downgrade)
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+    },
     /// Apply auto-fixes (safe fixes by default)
     Fix {
         files: Vec<PathBuf>,
@@ -157,6 +167,16 @@ fn main() {
     match cli.command {
         Some(Command::Watch) => {
             watch::start_watch(&root, &cfg);
+        }
+        Some(Command::SelfUpdate { check, version }) => {
+            match self_update::run(check, version.as_deref()) {
+                Ok(0) => {}
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("self-update failed: {e:#}");
+                    std::process::exit(2);
+                }
+            }
         }
         Some(Command::Fix { files, unsafe_fixes }) => {
             run_fix(&root, &cfg, files, unsafe_fixes);

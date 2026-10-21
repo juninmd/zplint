@@ -64,12 +64,17 @@ differential gate and the runtime smoke test — unit tests alone do not prove a
 
 ## Commits and pull requests
 
-- Conventional-commit style, matching the existing log: `feat(zpc): ...`, `fix: ...`,
-  `docs(zpc): ...`.
+- Commits (and PR titles, which become the squash-commit message) must follow
+  [Conventional Commits](https://www.conventionalcommits.org): `feat(rules): ...`,
+  `fix: ...`, `docs: ...`. The `Semantic PR title` check enforces it.
+- Releases are automatic. On every push to `master`, `.github/workflows/release.yml` reads the
+  commits since the last tag: `feat` -> minor, `fix`/`perf` -> patch, `type!:` or a
+  `BREAKING CHANGE:` footer -> major (minor while the version is 0.x). It bumps the version,
+  writes the `CHANGELOG.md` section, tags `vX.Y.Z` and publishes the GitHub release.
+  `docs`/`chore`/`ci`/`test`/`refactor`/`style`/`build` commits alone do not release.
+  Never bump versions or edit the generated changelog section by hand.
 - Keep the diff surgical: no unrelated refactors or reformatting.
-- Note the version bump only in a dedicated release commit; see
-  [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
-- Add a `CHANGELOG.md` entry under `## [Unreleased]` for anything user-visible.
+- crates.io publishing is still manual; see [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
 ## Reporting bugs
 
