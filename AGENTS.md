@@ -72,6 +72,8 @@ Node is required only for this regeneration step; building and running zplint ne
 | `src/output.rs` | Biome-style colored output (termcolor), prints rule ids |
 | `src/fix.rs` | Auto-fix for safe patterns |
 | `src/watch.rs` | Watch mode (notify) |
+| `src/self_update.rs` | `zplint self-update`: GitHub release download, SHA-256 check, binary swap |
+| `scripts/release.sh` | Conventional-commit version bump + release notes (used by release.yml) |
 | `src/discover.rs` | .sma file discovery |
 | `docs/KNOWLEDGE.md` | Knowledge base: every rule's problem/consequence/sources from web research |
 

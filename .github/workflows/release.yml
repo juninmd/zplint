@@ -1,23 +1,90 @@
 name: Release
 
+# Every push to master is inspected for Conventional Commits (scripts/release.sh):
+#   feat -> minor, fix/perf -> patch, `!` / BREAKING CHANGE -> major (minor while 0.x).
+# When a release is due this workflow bumps the version, updates CHANGELOG.md, tags,
+# builds the binaries and publishes the GitHub release that `zplint self-update` reads.
+# Commits that are only docs/chore/ci/test/refactor/style/build do not release.
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to build binaries for (e.g. v0.3.0)
-        required: true
+        description: Existing tag to (re)build and publish (e.g. v0.3.0)
+        required: false
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Plan release
+        id: plan
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          current=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml | head -1)
+          last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          range=${last:+$last..}HEAD
+          # Base the bump on the newest tag, not on a Cargo.toml that may lag it.
+          base=${last#v}; base=${base:-$current}
+          next=$(git log --no-merges --format='%B%x00' "$range" | scripts/release.sh next "$base")
+          echo "current=$current last=${last:-none} next=$next"
+          if [ "$next" = none ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          scripts/release.sh notes "$next" "$range" > notes.md
+          # Workspace version + the path deps that pin it (`version = "x", path = ...`).
+          sed -i -E \
+            -e '/^\[workspace.package\]/,/^\[/s/^version = ".*"/version = "'"$next"'"/' \
+            -e 's/^(zpc[a-z-]* = \{ version = )"[^"]*"/\1"'"$next"'"/' Cargo.toml
+          cargo update --workspace
+          # New section goes under [Unreleased]; anything hand-written there rides along.
+          NOTES="$(cat notes.md)" awk '
+            /^## \[Unreleased\]/ && !done { print; print ""; print ENVIRON["NOTES"]; done=1; next } { print }
+          ' CHANGELOG.md > CHANGELOG.new && mv CHANGELOG.new CHANGELOG.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): v$next [skip ci]"
+          git tag -a "v$next" -m "v$next"
+          git push origin HEAD:master "v$next"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.tag != '' && github.event.inputs.tag == ''
+        with:
+          name: notes
+          path: notes.md
+
   binaries:
-    name: ${{ matrix.target }}
+    name: build ${{ matrix.target }}
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,41 +92,67 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: tar.gz
+            exe: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: zip
+            exe: ".exe"
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive: tar.gz
+            exe: ""
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-
       - run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Stage archive
+      - name: Stage assets
         shell: bash
         run: |
-          name="zplint-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp LICENSE NOTICE README.md ATTRIBUTION.md "dist/$name/"
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          target="${{ matrix.target }}"
+          mkdir -p dist
+          # Raw binary + checksum: what `zplint self-update` downloads.
+          raw="dist/zplint-${target}${{ matrix.exe }}"
+          cp "target/${target}/release/zplint${{ matrix.exe }}" "$raw"
+          if command -v sha256sum >/dev/null; then sum=$(sha256sum "$raw"); else sum=$(shasum -a 256 "$raw"); fi
+          echo "${sum%% *}  $(basename "$raw")" > "$raw.sha256"
+          # Archive with docs for manual installs.
+          name="zplint-${tag}-${target}"
+          mkdir -p "stage/$name"
+          cp LICENSE NOTICE README.md ATTRIBUTION.md "target/${target}/release/zplint${{ matrix.exe }}" "stage/$name/"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp "target/${{ matrix.target }}/release/zplint.exe" "dist/$name/"
-            (cd dist && 7z a "$name.zip" "$name")
+            (cd stage && 7z a "../dist/$name.zip" "$name")
           else
-            cp "target/${{ matrix.target }}/release/zplint" "dist/$name/"
-            (cd dist && tar czf "$name.tar.gz" "$name")
+            (cd stage && tar czf "../dist/$name.tar.gz" "$name")
           fi
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: github release
+    needs: [prepare, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: github.event.inputs.tag == ''
+        with:
+          name: notes
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
-          generate_release_notes: true
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          files: dist/*
+          body_path: ${{ github.event.inputs.tag == '' && 'notes.md' || '' }}
+          generate_release_notes: ${{ github.event.inputs.tag != '' }}

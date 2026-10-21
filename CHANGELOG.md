@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `zplint self-update` (checksum-verified binary swap from GitHub releases) and automatic
+  semantic-commit releases (`scripts/release.sh`, `.github/workflows/release.yml`).
 - **P0/P1 Biome parity**: AST semantic pass (`src/sema_lint.rs`) with
   `unused_symbol` (203), `write_only_symbol` (204), `use_before_init` (210) and
   `unintended_bitwise` (212); rule categories + `--only=correctness` /

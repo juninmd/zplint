@@ -48,6 +48,8 @@ termcolor = "1"
 walkdir = "2"
 notify = { version = "8", features = ["macos_kqueue"] }
 anyhow = "1"
+ureq = { version = "3", features = ["platform-verifier"] }
+sha2 = "0.10"
 rayon = "1"
 zpc-amxx.workspace = true
 zpc-asm.workspace = true

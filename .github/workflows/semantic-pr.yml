@@ -1,0 +1,24 @@
+name: Semantic PR title
+
+# Squash merges use the PR title as the commit message, and that message drives the
+# automatic version bump in release.yml. Fail early when it is not a Conventional Commit.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          re='^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^)]+\))?!?: .+'
+          if [[ ! $TITLE =~ $re ]]; then
+            echo "::error::PR title must follow Conventional Commits, e.g. 'feat(rules): add path_traversal'. Got: $TITLE"
+            exit 1
+          fi
