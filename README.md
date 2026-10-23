@@ -1,45 +1,106 @@
-# zplint 🔍
+# zplint
 
 [![CI](https://github.com/juninmd/zplint/actions/workflows/ci.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/zplint.svg)](https://crates.io/crates/zplint)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#install)
+[![Release](https://github.com/juninmd/zplint/actions/workflows/release.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/release.yml)
+[![Licença](https://img.shields.io/badge/licen%C3%A7a-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#requisitos)
 
-Lightning-fast linter for **Pawn / AMX Mod X** plugins (CS 1.6), with deep **Zombie Plague 5.0** support.  
-Scans `.sma` files for **150+ detectors**: compile errors before you compile, runtime-crash patterns
-(HLDS `svc_bad` / segfault / run time errors 3/4/10/11), engine limits (precache/edicts/netchan),
-tag-mismatch bugs, and ZP50 API contract violations.
+Linter rápido para plugins **Pawn / AMX Mod X** (`.sma`) de Counter-Strike 1.6, com suporte profundo ao
+**Zombie Plague 5.0**. É feito para quem mantém servidores HLDS e coleções grandes de plugins: encontra,
+antes de compilar e antes de subir no servidor, erros de compilação, padrões que derrubam o servidor
+(`svc_bad`, segfault, run time errors 3/4/10/11), estouro de limites do engine (precache, edicts, netchan),
+bugs de tag e violações do contrato da API do ZP 5.0.
 
-Every rule is backed by a documented source (AMXX compiler sources, AlliedModders wiki/forums,
-amxmodx.org API docs, official ZP 5.0 sources) — see [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md).
+Além do linter, o mesmo binário formata (`fmt`), corrige (`fix`), serve LSP (`lsp`), compila `.sma` para
+`.amxx` (`compile`) e desmonta plugins (`disasm`). Escrito em **Rust**, paralelizado com rayon, em um único
+binário sem dependências de runtime.
 
-Written in **Rust**, parallelized with rayon. Single binary, zero runtime dependencies.
-~1.7s for 542 files. Reads Windows-1252 legacy files, honors `#pragma ctrlchar`.
+## Índice
 
-Validated against two corpora: the official `alliedmodders/amxmodx` bundled plugins
-(**0 errors** excluding `plugins/testsuite`, which intentionally exercises invalid paths) and
-a 542-file real-world ZP plugin collection.
+- [Funcionalidades](#funcionalidades)
+- [Arquitetura](#arquitetura)
+- [Requisitos](#requisitos)
+- [Instalação](#instalação)
+- [Uso](#uso)
+- [Compilador](#compilador)
+- [Regras](#regras)
+- [Configuração](#configuração)
+- [Desenvolvimento](#desenvolvimento)
+- [Gates de CI](#gates-de-ci)
+- [Terminal e screenshot](#terminal-e-screenshot)
+- [Desempenho](#desempenho)
+- [Licença](#licença)
 
-## Install
+## Funcionalidades
 
-Requires Rust **1.88+** (edition 2024).
+Cada item abaixo corresponde a um subcomando real (`zplint --help`).
 
-Prebuilt binaries (Linux x86_64, Windows x86_64, macOS arm64) are attached to every
-[GitHub release](https://github.com/juninmd/zplint/releases). Once installed, keep it current with:
+- **Linter** (`lint`, `ci`): 153 regras listadas por `zplint rules`, cada uma com fonte documentada em
+  [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md) (fontes do compilador AMXX, wiki/fóruns AlliedModders,
+  documentação amxmodx.org, fontes oficiais do ZP 5.0).
+- **Seleção de regras**: `--only` e `--skip` aceitam id, categoria (`correctness`, `suspicious`,
+  `performance`, `security`, `style`), `recommended` ou `all`.
+- **Reporters**: `default`, `json`, `github`, `sarif` e `junit`.
+- **Modo incremental**: `--changed`, `--staged` e `--since <rev>` lintam só o que mudou no git.
+- **Correção automática** (`fix`): só transformações 100% seguras; `--unsafe-fixes` inclui os reescritos
+  semânticos (ZP `if (x)` para `if (x > 0)`).
+- **Formatador** (`fmt --check` / `fmt --write`): indentação, ordem de includes e espaços em branco.
+- **LSP** (`lsp`): diagnósticos, hover, quick fixes e formatação via stdio.
+- **Watch** (`watch`): relinta ao salvar.
+- **Supressões** por comentário (`zplint-ignore`, `zplint-ignore-next-line`, `zplint-ignore-file`).
+- **Compilador** (`compile`) para `.amxx` compatível com AMXX 1.10 e desmontador (`disasm`).
+- **Auto-atualização** (`self-update`): baixa o release do GitHub, confere SHA-256 e troca o binário.
+- Lê arquivos legados em Windows-1252 e respeita `#pragma ctrlchar`.
 
-```bash
-zplint self-update           # download, verify SHA-256 and replace the running binary
-zplint self-update --check   # exit 1 when a newer release exists
+Validado contra dois corpora: os plugins oficiais do `alliedmodders/amxmodx` (**0 erros**, excluindo
+`plugins/testsuite`, que exercita caminhos inválidos de propósito) e uma coleção real de 542 plugins ZP.
+
+## Arquitetura
+
+O binário `zplint` (`src/`) orquestra a CLI e usa as crates `zpc-*` (`crates/`), o front-end do compilador
+Pawn, tanto para o lint semântico quanto para o `compile`. Num `lint`, o arquivo passa primeiro pelo
+caminho AST; se o parser não conseguir ler o arquivo, só o motor de regex roda, então uma lacuna do
+parser nunca remove nem inventa diagnóstico.
+
+```mermaid
+flowchart LR
+    CLI["main.rs (clap)"] --> CFG["config.rs (zplint.toml)"]
+    CLI --> DISC["discover.rs"]
+    DISC --> ENG["engine.rs: lint_file"]
+    ENG --> AST["ast_lint.rs"]
+    AST --> SEMA["sema_lint.rs"]
+    SEMA --> ZPC["crates zpc-lex, zpc-parse, zpc-sema"]
+    ENG --> DET["detectors.rs"]
+    ENG --> API["api_check.rs (api.rs gerado)"]
+    CLI --> OUT["output.rs: default, json, github, sarif, junit"]
+    CLI --> FIX["fix.rs"]
+    CLI --> FMT["fmt.rs"]
+    CLI --> LSP["lsp.rs"]
+    CLI --> WATCH["watch.rs"]
+    CLI --> UPD["self_update.rs"]
+    CLI --> CMP["compile_cmd.rs"]
+    CMP --> CG["crates zpc-codegen, zpc-asm, zpc-amxx"]
+    CLI --> DIS["disasm_cmd.rs"]
 ```
 
-From crates.io:
+## Requisitos
+
+- Para compilar do código-fonte: Rust **1.88+** (edição 2024).
+- Para usar um binário pronto: nenhum.
+- Node.js só é necessário para regenerar `src/api.rs` e para o gate diferencial do compilador
+  (`scripts/genapi.mjs`, `scripts/difftest.mjs`); compilar e rodar o zplint nunca precisa dele.
+
+## Instalação
+
+Binários prontos (Linux x86_64, Windows x86_64, macOS arm64) ficam anexados a cada
+[release do GitHub](https://github.com/juninmd/zplint/releases). Depois de instalado, mantenha atualizado com:
 
 ```bash
-cargo install zplint
-zplint --help
+zplint self-update           # baixa, confere o SHA-256 e substitui o binário em execução
+zplint self-update --check   # sai com código 1 quando existe release mais novo
 ```
 
-From source:
+Do código-fonte:
 
 ```bash
 git clone https://github.com/juninmd/zplint
@@ -48,98 +109,166 @@ cargo build --release
 ./target/release/zplint --help
 ```
 
-## Usage
+Ou direto do GitHub: `cargo install --git https://github.com/juninmd/zplint`.
 
-```bash
-zplint lint              # Lint all .sma files
-zplint lint file.sma     # Lint specific file
-zplint lint folder/      # Lint .sma files under a folder
-zplint watch             # Re-lint on file save
-zplint fix               # Apply auto-fixes
-zplint explain <rule>    # Show the docs entry and severity for a rule id
+O pacote ainda não está publicado no crates.io (a consulta à API do crates.io retorna 404 para `zplint`);
+o roteiro de publicação está em [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
-# CI / editor workflow
-zplint lint --json --max-diagnostics 0
-zplint lint --only handle_leak,menu_handler_handled
-zplint lint --skip get_cvar_hotpath,deprecated_symbols
-zplint lint --error-on-warnings
-```
+## Uso
 
-### Biome-style workflow
-
-```bash
-zplint rules                       # list ids, category, severity, description
-zplint rules --json
-zplint lint --only=style           # category selector
-zplint lint --skip=performance
-zplint lint --reporter=github      # default | json | github | sarif | junit
-zplint ci                          # read-only, warnings fail
-zplint ci --changed --since=main   # only files changed since main
-zplint ci --staged                 # only staged files
-zplint fix                         # safe fixes only
-zplint fix --unsafe-fixes          # include semantic narrowing fixes
-zplint fmt --check                 # verify formatting
-zplint fmt --write                 # indentation, include order, whitespace
-zplint lsp                         # diagnostics, hover, quick fixes, format
-```
-
-### Suppressions
-
-Biome-style comment suppressions work on the same line, the next code line, or
-the whole file. An optional rule list narrows the suppression; everything after
-`--` is a free-text reason.
+Os exemplos abaixo usam este plugin sintético, `demo.sma` (criado só para esta documentação):
 
 ```pawn
-abort() // zplint-ignore abort_call -- test fixture
+#include <amxmodx>
 
-// zplint-ignore-next-line get_user_msgid_in_precache -- ids are cached below
-get_user_msgid("TextMsg")
+public plugin_init()
+{
+	register_plugin("Demo", "1.0", "dev")
+	set_task(10, "tick")
+	new Float:x = 1
+	abort()
+}
 
-// zplint-ignore-file duplicate_include -- generated file
+public tick()
+{
+	client_print(0, print_chat, "tick")
+}
 ```
 
-## Compiler
-
-`zplint compile` produces AMXX 1.10-compatible `.amxx` plugins:
+**1. Lintar um arquivo** (código de saída 1 porque há erros):
 
 ```bash
-zplint compile plugin.sma --include path/to/amxmodx/scripting/include
+zplint lint demo.sma
 ```
 
-Release gate:
+```text
+demo.sma
+  x L6: set_task interval 10 is an integer (warning 213); the bit pattern becomes ~1e-44s (runs every frame) - write 10.0  set_task_int_interval
+  x L7: symbol is assigned a value that is never used: "x" (warning 204)  write_only_symbol
+  x L8: abort() causes run time error 1 - use log_error() for graceful degradation  abort_call
+  x L8: abort() takes at least 1 argument(s), 0 given  api_arity
+
+x 4 issue(s) (3 error(s), 1 warning(s))
+  1 file(s) -- 53.37ms
+```
+
+**2. Anotações para o GitHub Actions** (`--reporter=github`):
+
+```bash
+zplint lint --reporter=github demo.sma
+```
+
+```text
+::error file=demo.sma,line=6,title=set_task_int_interval::set_task interval 10 is an integer (warning 213); the bit pattern becomes ~1e-44s (runs every frame) - write 10.0
+::warning file=demo.sma,line=7,title=write_only_symbol::symbol is assigned a value that is never used%3A "x" (warning 204)
+::error file=demo.sma,line=8,title=abort_call::abort() causes run time error 1 - use log_error() for graceful degradation
+::error file=demo.sma,line=8,title=api_arity::abort() takes at least 1 argument(s)%2C 0 given
+```
+
+**3. Entender uma regra** (a saída é o trecho de [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md), em inglês):
+
+```bash
+zplint explain set_task_int_interval
+```
+
+```text
+### 2.4 int literal in Float slot (warning 213) `[rules: set_task_int_interval, pev_float_int]`
+Pawn does NOT convert: the integer bit pattern is reinterpreted as IEEE float.
+`set_task(10, ...)` schedules ~1.4e-44 s (runs every frame). ...
+Rule: set_task_int_interval
+Severity: error
+```
+
+**4. Filtrar regras**: `--skip` com ids separados por vírgula remove só essas regras (neste arquivo restam
+2 achados, 1 erro e 1 aviso):
+
+```bash
+zplint lint --skip abort_call,api_arity demo.sma
+```
+
+Outros comandos (saída não verificada neste README):
+
+```bash
+zplint watch                       # relinta ao salvar
+zplint fix                         # aplica só correções seguras
+zplint fix --unsafe-fixes          # inclui as correções semânticas
+zplint fmt --check                 # verifica formatação
+zplint fmt --write                 # aplica formatação
+zplint ci                          # somente leitura, avisos também falham
+zplint ci --changed --since=main   # só arquivos alterados desde main
+zplint ci --staged                 # só arquivos no stage
+zplint lsp                         # servidor LSP via stdio
+zplint lint --only=style           # seleção por categoria
+zplint lint --reporter=sarif       # default | json | github | sarif | junit
+zplint rules --json                # catálogo de regras em JSON
+```
+
+Sem argumentos, `zplint lint` varre os caminhos de `paths` do `zplint.toml` (padrão embutido:
+`meus_plugins_organizados`, um diretório do autor); fora desse caso, passe arquivos ou pastas
+explicitamente, por exemplo `zplint lint plugins/`.
+
+### Supressões
+
+Supressões por comentário valem na mesma linha, na próxima linha de código ou no arquivo inteiro. Uma lista
+opcional de regras restringe a supressão; tudo depois de `--` é o motivo em texto livre.
+
+```pawn
+abort() // zplint-ignore abort_call -- fixture de teste
+
+// zplint-ignore-next-line get_user_msgid_in_precache -- ids são guardados em cache abaixo
+get_user_msgid("TextMsg")
+
+// zplint-ignore-file duplicate_include -- arquivo gerado
+```
+
+## Compilador
+
+`zplint compile` gera plugins `.amxx` compatíveis com AMXX 1.10. É preciso apontar o diretório de includes do
+AMX Mod X (o repositório não traz os `.inc`):
+
+```bash
+zplint compile plugin.sma --include caminho/para/amxmodx/scripting/include
+```
+
+Opções reais: `-o/--output`, `-i/--include` (repetível) e `--emit-asm`. `zplint disasm plugin.amxx` desmonta
+o resultado (`--normalised` torna builds comparáveis). Saída não verificada neste README, porque os includes do
+AMXX não estão no repositório.
+
+Gate de release do compilador:
 
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --release
-node scripts/difftest.mjs --amxxpc path/to/amxxpc.exe \
-  --include path/to/amxmodx/scripting/include --corpus path/to/amxmodx/plugins
+node scripts/difftest.mjs --amxxpc caminho/para/amxxpc.exe \
+  --include caminho/para/amxmodx/scripting/include --corpus caminho/para/amxmodx/plugins
 pwsh scripts/runtime-test.ps1
 ./target/release/zplint lint
 ```
 
-The differential gate compares accept/reject decisions, requires output presence
-to match the exit status, and disassembles every successful zplint artifact. It
-keeps generated files in a temporary directory. `--strict-diagnostics` additionally
-compares diagnostic tuples.
+O gate diferencial compara as decisões de aceitar/rejeitar com o `amxxpc` de referência, exige que a presença
+de saída coincida com o status de saída e desmonta todo artefato gerado pelo zplint. Os arquivos gerados ficam
+num diretório temporário. `--strict-diagnostics` compara também as tuplas de diagnóstico.
 
-The runtime gate compiles the same fixture with `amxxpc` and zplint, then loads and
-executes both in a real AMX Mod X 1.10/HLDS container. It covers public forwards,
-an asynchronous callback, native binding, globals, local and multidimensional
-arrays, recursion, by-reference arguments, floats/user operators, strings and
-switch control flow. Docker, the server image, AMXX 1.10 Linux core and reference
-`amxxpc` are required; paths can be supplied through `AMXXPC`,
-`AMXX_INCLUDE_DIR`, and `AMXX_CORE`.
+O gate de runtime compila a mesma fixture com `amxxpc` e com o zplint, carrega e executa os dois num container
+real de AMX Mod X 1.10/HLDS. Cobre forwards públicos, callback assíncrono, binding de native, globais, arrays
+locais e multidimensionais, recursão, argumentos por referência, floats/operadores de usuário, strings e
+`switch`. Exige Docker, a imagem do servidor, o core Linux do AMXX 1.10 e o `amxxpc` de referência; os caminhos
+podem vir de `AMXXPC`, `AMXX_INCLUDE_DIR` e `AMXX_CORE`.
 
-Measured baseline: 74/74 current official AlliedModders plugins have acceptance
-parity. Runtime reference and zplint artifacts both emit `ZPLINT_RUNTIME_PASS`.
-Generated code is not byte-identical to `amxxpc`; production rollout should still
-start as a canary and keep the runtime gate mandatory.
+Baseline medido pelo autor: 74/74 plugins oficiais atuais da AlliedModders com paridade de aceitação. Os
+artefatos de referência e do zplint emitem `ZPLINT_RUNTIME_PASS`. O código gerado não é idêntico byte a byte ao
+do `amxxpc`; a adoção em produção deve começar como canário e manter o gate de runtime obrigatório.
 
-## Rules (150+ detectors)
+## Regras
 
-### Player Validation (8)
-| Rule | Severity | Fix | Description |
+`zplint rules` lista as 153 regras com categoria, severidade e descrição. As tabelas abaixo são o catálogo
+curado: **este arquivo é embutido no binário em tempo de compilação** (`include_str!` em `src/rule_meta.rs` e
+`src/main.rs`) e alimenta `zplint rules` e `zplint explain`. Por isso as linhas de tabela que começam com
+`` | `id` `` e as descrições, que são dados do catálogo, ficam em inglês e não podem mudar de formato.
+
+### Validação de jogador (8)
+| Regra | Severidade | Correção | Descrição |
 |------|----------|-----|-------------|
 | `client_disconnect_guard` | error | ❌ | Risky natives in client_disconnected without guard |
 | `dangerous_forward_guard` | error | ❌ | Risky natives in fw_Killed/Ham_Killed/fw_Spawn |
@@ -150,8 +279,8 @@ start as a canary and keep the runtime gate mandatory.
 | `zp_infect_cure_guard` | error | ❌ | zp_core_infect/cure without is_zombie check |
 | `zp_force_no_guard` | error | ❌ | zp_core_force_infect/cure bypasses validation |
 
-### Entity & Memory (9)
-| Rule | Severity | Fix | Description |
+### Entidades e memória (9)
+| Regra | Severidade | Correção | Descrição |
 |------|----------|-----|-------------|
 | `create_entity_guard` | error | ❌ | create_entity without is_valid_ent check |
 | `nested_message` | error | ❌ | Nested message_begin without message_end (crashes server) |
@@ -163,8 +292,8 @@ start as a canary and keep the runtime gate mandatory.
 | `touch_spam` | warning | ❌ | Touch handler spams client_print |
 | `precache_sound` | error | ❌ | emit_sound with custom sound never precached |
 
-### ZP API Misuse (5)
-| Rule | Severity | Fix | Description |
+### Uso incorreto da API do ZP (5)
+| Regra | Severidade | Correção | Descrição |
 |------|----------|-----|-------------|
 | `zp_gamemode_if` | error | ✅ | `if (mode)` should be `if (mode > 0)` |
 | `zp_class_if` | error | ✅ | `if (class)` should be `if (class > 0)`; also checks `zp_class_*_register()` in wrong scope |
@@ -172,8 +301,8 @@ start as a canary and keep the runtime gate mandatory.
 | `precache_outside_precache` | error | ❌ | precache_*() called in plugin_init() not plugin_precache() -> crash |
 | `library_exists_hotpath` | warning | ❌ | LibraryExists() per-hit in TakeDamage (cache as bool) |
 
-### AMXX General (10)
-| Rule | Severity | Fix | Description |
+### AMXX geral (10)
+| Regra | Severidade | Correção | Descrição |
 |------|----------|-----|-------------|
 | `set_task_public` | error | ❌ | set_task callback is non-public function |
 | `registered_callback_public` | error | ❌ | menu/register callback is non-public function |
@@ -186,8 +315,8 @@ start as a canary and keep the runtime gate mandatory.
 | `menu_handler_destroy` | error | ❌ | dynamic menu_create handler does not call menu_destroy |
 | `fopen_close` | error | ❌ | fopen handle is not closed with fclose in same function |
 
-### Code Smells (5)
-| Rule | Severity | Fix | Description |
+### Maus cheiros de código (5)
+| Regra | Severidade | Correção | Descrição |
 |------|----------|-----|-------------|
 | `abort_call` | error | ❌ | abort() causes run time error 1 |
 | `precache_sound_sprite` | error | ❌ | precache_sound on sprite-named variable (use precache_model) |
@@ -195,14 +324,14 @@ start as a canary and keep the runtime gate mandatory.
 | `client_cmd_spk` | warning | ❌ | client_cmd(0, "spk...") instead of emit_sound |
 | `hardcoded_maxplayers` | warning | ❌ | loop uses `#define MAXPLAYERS 32` as runtime player count |
 
-## Research-driven detectors
+## Detectores baseados em pesquisa
 
-Added from internet research of real compile errors, crash reports and API docs
-(sources in [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md)). All are on by default; turn any off
-via `rules.disable` (see Config).
+Adicionados a partir de pesquisa na internet sobre erros reais de compilação, relatórios de crash e
+documentação da API (fontes em [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md)). Todos vêm ligados por padrão;
+desligue qualquer um por id em `disable`, na tabela `[rules]` (veja [Configuração](#configuração)).
 
-### Compile structure (9)
-| Rule | Severity | Description |
+### Estrutura de compilação (9)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `unbalanced_braces` | error | File ends with unmatched `{`/`}` (errors 030/054, cascades into 010/004) |
 | `unbalanced_preprocessor` | error | `#if`/`#else`/`#endif` stack errors (026/060/061) |
@@ -214,8 +343,8 @@ via `rules.disable` (see Config).
 | `array_index_oob` | error | Literal out-of-bounds array write, e.g. `Players[32] = 15` on a 32-slot array (valid 0-31) |
 | `array_compare_by_ref` | error | `arr1 == arr2` compares array references, not contents — doesn't compile in Pawn |
 
-### Correctness (14)
-| Rule | Severity | Description |
+### Corretude (14)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `string_literal_compare` | error | `== "..."` — strings need equal()/equali() (error 033) |
 | `string_assign` | warning | String literal larger than the destination array (error 047) |
@@ -232,8 +361,8 @@ via `rules.disable` (see Config).
 | `func_id_truthy` | warning | `get_func_id()`/`get_xvar_id()` return -1 on failure but id 0 is valid — bare truthiness (direct or via variable) misreads it as failure |
 | `global_shadowing` | warning | Local `new` shadows a global (warning 219) |
 
-### Tag mismatch — warning 213 that misbehaves at runtime (13)
-| Rule | Severity | Description |
+### Incompatibilidade de tag: warning 213 com efeito em runtime (13)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `set_task_int_interval` | error | `set_task(10, ..)` → interval becomes ~1e-44s (runs every frame) |
 | `pev_float_int` | error | Integer into Float pev field (pev_health 100 → ~1.4e-43 = instant death) |
@@ -249,8 +378,8 @@ via `rules.disable` (see Config).
 | `amxmodx_int_float` | error | Float literal into a `set_hudmessage`/`set_dhudmessage`/`emit_sound`/`change_task` int slot |
 | `amxmodx_float_int` | error | Int literal into a `set_hudmessage`/`set_dhudmessage`/`emit_sound`/`change_task` Float slot (fxtime, holdtime, vol, att, newTime, ...) |
 
-### Runtime crashes (7)
-| Rule | Severity | Description |
+### Crashes em runtime (7)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `userid_as_index` | error | `arr[get_user_userid(id)]` — userid is a session counter, not an index (RTE 4) |
 | `player_array_32` | error | `new arr[32]` indexed by player id — overflows on full server (RTE 4) |
@@ -260,8 +389,8 @@ via `rules.disable` (see Config).
 | `pragma_dynamic_stack` | warning | Local array ≥ 2048 cells without `#pragma dynamic` (RTE 3) |
 | `format_injection` | warning | User text (read_args/get_user_name) as format string — `%` in chat crashes |
 
-### Engine / HLDS limits (10)
-| Rule | Severity | Description |
+### Limites do engine e do HLDS (10)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `precache_mp3` | error | .mp3 through precache_sound/emit_sound — never plays; use precache_generic |
 | `sound_prefix` | error | `"sound/..."` prefix — paths are already relative to sound/ |
@@ -274,8 +403,8 @@ via `rules.disable` (see Config).
 | `changelevel_cmd` | warning | server_cmd changelevel bypasses forwards and map validity check |
 | `geoip_code_overflow` | error | `geoip_code2/3()` overflow their result buffer by one cell on an unknown IP — use the `_ex` variant |
 
-### API contracts & modernization (8)
-| Rule | Severity | Description |
+### Contratos de API e modernização (8)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `callback_not_defined` | warning | Registered callback string has no function in the file ("function not found") |
 | `client_command_handled` | warning | PLUGIN_HANDLED in client_command starves other plugins (use _MAIN) |
@@ -286,8 +415,8 @@ via `rules.disable` (see Config).
 | `strlen_in_loop` | warning | strlen() in loop condition — O(n²) |
 | `buffer_in_loop` / `read_file_loop` | warning | Array re-zeroed per iteration / O(n²) file API in loops |
 
-### ZP 5.0 API (6)
-| Rule | Severity | Description |
+### API do ZP 5.0 (6)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `zp_fw_attacker_guard` | error | zp_fw_core_infect/cure `attacker` is 0 for gamemode/admin infections |
 | `zp_select_pre_filter` | warning | select_pre returns restrictive ZP_* without using itemid/classid — blocks ALL items |
@@ -296,16 +425,16 @@ via `rules.disable` (see Config).
 | `zp50_get_in_init` | warning | zp50 query natives in plugin_init ("Invalid Array Handle" load-order bug) |
 | `zp43_mixing` | warning | ZP 4.3 API (`<zombieplague>`) mixed with zp50 includes |
 
-### Semantic warnings (4)
-| Rule | Severity | Description |
+### Avisos semânticos (4)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `unused_symbol` | warning | Local/global declared but never read (amxxpc warning 203) |
 | `write_only_symbol` | warning | Assigned but never read (warning 204) |
 | `use_before_init` | warning | Scalar read before its first assignment (warning 210; Pawn does not zero scalars) |
 | `unintended_bitwise` | warning | `&`/`|` between two boolean expressions (warning 212) |
 
-### Security & player contracts (5)
-| Rule | Severity | Description |
+### Segurança e contratos de jogador (5)
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `sql_injection` | warning | User-controlled `%s` in `SQL_PrepareQuery`/`SQL_ThreadQuery` without `SQL_QuoteString` |
 | `resource_leak_on_return` | warning | Handle freed later but leaked by an early `return` (path-aware) |
@@ -313,9 +442,9 @@ via `rules.disable` (see Config).
 | `find_player_flags` | warning | `find_player` userid match (`k`) combined with name/authid flags |
 | `read_data_bounds` | warning | `read_data(N)` outside the event's argument range |
 
-### Contracts, includes & tooling (5)
+### Contratos, includes e ferramentas (5)
 
-| Rule | Severity | Description |
+| Regra | Severidade | Descrição |
 |------|----------|-------------|
 | `menu_handler_handled` | warning | `menu_create` handler never returns `PLUGIN_HANDLED` (legacy menu handlers can also consume the selection) |
 | `get_user_msgid_in_precache` | warning | `get_user_msgid()` in `plugin_precache` returns 0 on the first server start |
@@ -323,61 +452,119 @@ via `rules.disable` (see Config).
 | `unknown_pragma` | warning | `#pragma` outside amxxpc's vocabulary (warning 207, silently ignored) |
 | `sizeof_scalar` | warning | `sizeof` on a scalar is always 1 (warning 223) |
 
-Two existing rules were widened in the same batch:
 
-- `callback_not_defined` / `registered_callback_public` now cover
-  `register_event`, `register_forward`, `RegisterHam*`, `register_think`,
-  `register_touch`, `register_impulse` and `register_logevent` — not just the
-  command/menu/message registrations.
-- `handle_leak` / `handle_use_after_destroy` now cover 24 constructor/destructor
-  pairs from the bundled includes: array, trie, stack, datapack, tr2, kvd,
-  forward, SQL tuple/connection, DBI, nvault, regex, socket, SMC/INI parser and
-  JSON handles. Globals stay exempt (plugin lifetime); locals are checked.
+Duas regras existentes foram ampliadas no mesmo lote:
 
-The full research, gap matrix and prioritized backlog are in
+- `callback_not_defined` / `registered_callback_public` agora cobrem também `register_event`,
+  `register_forward`, `RegisterHam*`, `register_think`, `register_touch`, `register_impulse` e
+  `register_logevent`, e não só os registros de comando, menu e mensagem.
+- `handle_leak` / `handle_use_after_destroy` agora cobrem 24 pares construtor/destrutor dos includes
+  embutidos: array, trie, stack, datapack, tr2, kvd, forward, tuple/conexão SQL, DBI, nvault, regex, socket,
+  parser SMC/INI e handles JSON. Globais continuam isentos (vida do plugin); locais são verificados.
+
+A pesquisa completa, a matriz de lacunas e o backlog priorizado estão em
 [`docs/BIOME_PARITY.md`](docs/BIOME_PARITY.md).
 
-## Config
+## Configuração
 
-`zplint.toml` in project root:
+O `zplint.toml` fica na raiz do projeto (o diretório de onde o `zplint` é executado). As chaves ficam no
+nível raiz do arquivo, sem tabela `[lint]`; chaves desconhecidas são ignoradas em silêncio.
 
 ```toml
-[lint]
-paths = ["meus_plugins_organizados"]
-exclude = ["00-Old_Archive"]
+paths = ["plugins"]            # pastas varridas por `zplint lint` sem argumentos
+exclude = ["old"]              # qualquer caminho que contenha este texto é ignorado
 
-[lint.rules]
-# original detectors: true = enable, false = disable
+[rules]
+# detectores originais: true = ligado, false = desligado
 client_disconnect_guard = true
-zp_gamemode_if = true
 abort_call = false
-# research-driven detectors are on by default; turn off by id:
+# detectores baseados em pesquisa ficam ligados; desligue por id:
 disable = ["deprecated_symbols", "get_cvar_hotpath"]
+# ast = false  # desliga o caminho AST e usa só o motor de regex
 
 [output]
 color = true
 ```
 
-Severity model: **errors** are crash/compile-failure patterns and set exit code 1;
-**warnings** are style/perf/modernization signals and never fail CI.
+Sem `zplint.toml`, o padrão é `paths = ["meus_plugins_organizados"]` e `exclude = ["00-Old_Archive"]`.
+Verificado: com `paths`, `exclude`, `[rules]` com `abort_call = false` e `disable = ["api_arity"]`, essas duas
+regras somem do relatório.
 
-## Performance
+Atenção: um `zplint.toml` com TOML inválido não gera erro; o zplint volta aos padrões em silêncio
+(`Config::load(...).unwrap_or_default()` em `src/main.rs`).
 
-542 real `.sma` files = **1.7s**; official amxmodx plugins (74 files) = **0.35s** (release build, rayon-parallel).
-Non-UTF8 (Windows-1252) legacy files are decoded, not skipped.
+Modelo de severidade: **erros** são padrões de crash ou falha de compilação e definem o código de saída 1;
+**avisos** são sinais de estilo, performance e modernização e nunca quebram o CI (a menos que se use
+`--error-on-warnings` ou `zplint ci`).
 
-## License
+## Desenvolvimento
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Veja também [`CONTRIBUTING.md`](CONTRIBUTING.md) e [`AGENTS.md`](AGENTS.md).
 
-The `zpc` compiler subproject contains code derived from the Pawn compiler by ITB CompuPhase
-(zlib-style licence). **zpc is an altered version** of that software, not the original, and
-its defects are ours. The upstream notice travels with every source distribution in
-[`NOTICE`](NOTICE); per-component provenance is in [`ATTRIBUTION.md`](ATTRIBUTION.md) and the
-engineering rules that keep GPL code out of this repository are in
-[`docs/LICENSING.md`](docs/LICENSING.md).
+```bash
+cargo build --workspace                                   # build de debug
+cargo build --release                                     # build de release
+cargo test --workspace                                    # testes (unitários, integração e fixtures)
+cargo clippy --workspace --all-targets -- -D warnings     # lint do Rust, gate do CI
+```
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
-in this work shall be licensed as above, without any additional terms or conditions.
+Não há `cargo fmt --check` no CI: a árvore é anterior ao rustfmt, então não reformate arquivos que você não
+está alterando.
 
+Para regenerar a tabela de API (`src/api.rs` é gerado, nunca edite à mão):
 
+```bash
+node scripts/genapi.mjs <clone>/plugins/include src/api.rs
+cargo test
+```
+
+Um detector novo só entra com fonte documentada em [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md), **zero** achados
+nos plugins oficiais do `alliedmodders/amxmodx` e testes que cubram o caso positivo e um quase-acerto que não
+pode disparar.
+
+Outros documentos: [`docs/BIOME_PARITY.md`](docs/BIOME_PARITY.md), [`docs/COMPILER_MIGRATION.md`](docs/COMPILER_MIGRATION.md),
+[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), [`docs/LICENSING.md`](docs/LICENSING.md),
+[`docs/PUBLISHING.md`](docs/PUBLISHING.md), [`CHANGELOG.md`](CHANGELOG.md), [`SECURITY.md`](SECURITY.md).
+
+## Gates de CI
+
+Workflows em `.github/workflows/`:
+
+- **CI** (`ci.yml`, em push na `master` e em PRs): `clippy` (`cargo clippy --workspace --all-targets -- -D warnings`),
+  `test` em ubuntu, windows e macOS (`cargo test --workspace`), `MSRV 1.88` (`cargo check --workspace --all-targets`),
+  `cargo package` (`cargo package --workspace --no-verify`) e `cargo audit` (RustSec).
+- **Semantic PR title** (`semantic-pr.yml`): o título do PR precisa seguir Conventional Commits, porque o
+  squash merge usa o título como mensagem de commit.
+- **Release** (`release.yml`, em push na `master`): `scripts/release.sh` calcula a versão a partir dos commits
+  (`feat` = minor, `fix`/`perf` = patch, `!` ou `BREAKING CHANGE` = major, minor enquanto 0.x), atualiza o
+  `CHANGELOG.md`, cria a tag e publica os binários que o `self-update` lê. Commits só de `docs`, `chore`, `ci`,
+  `test`, `refactor`, `style` e `build` não geram release.
+- **Security Scan** (`security.yml`, em push na `master`, semanal e manual): workflow reutilizável
+  `juninmd/base-actions`.
+
+## Terminal e screenshot
+
+O zplint é uma CLI, sem interface gráfica: não há screenshot. A captura real do `--help`, do lint do
+`demo.sma`, dos reporters, do `fmt --check`, de `rules` e de `explain` está em
+[`docs/terminal.txt`](docs/terminal.txt) (texto, gerado com o build de release 0.4.0; só o caminho absoluto do
+diretório temporário foi removido). Print pendente: não se aplica a uma CLI.
+
+## Desempenho
+
+Números medidos pelo autor com o build de release (rayon, paralelo): 542 arquivos `.sma` reais em ~1,7 s e os
+74 plugins oficiais do amxmodx em ~0,35 s. Arquivos legados em Windows-1252 são decodificados, não ignorados.
+Esses corpora não estão no repositório, então os números não foram reproduzidos aqui; num único arquivo de
+demonstração o lint levou ~50 ms (ver `docs/terminal.txt`).
+
+## Licença
+
+Licenciado sob a [Apache License, Version 2.0](LICENSE).
+
+O subprojeto de compilador `zpc` contém código derivado do compilador Pawn da ITB CompuPhase (licença no
+estilo zlib). **O zpc é uma versão alterada** desse software, não o original, e seus defeitos são nossos. O
+aviso original acompanha toda distribuição de código-fonte em [`NOTICE`](NOTICE); a procedência por
+componente está em [`ATTRIBUTION.md`](ATTRIBUTION.md) e as regras de engenharia que mantêm código GPL fora
+deste repositório estão em [`docs/LICENSING.md`](docs/LICENSING.md).
+
+Salvo declaração explícita em contrário, qualquer contribuição enviada intencionalmente para inclusão neste
+trabalho será licenciada como acima, sem termos ou condições adicionais.
