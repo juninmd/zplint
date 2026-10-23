@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" rx="24" fill="#0f172a"/>
+  <text x="80" y="180" fill="#f8fafc" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="96" font-weight="700">zplint</text>
+  <text x="80" y="236" fill="#94a3b8" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="32">Linter para plugins AMX Mod X · CS 1.6 · ZP 5.0</text>
+  <rect x="80" y="270" width="1120" height="330" rx="16" fill="#1e293b"/>
+  <circle cx="112" cy="296" r="9" fill="#ef4444"/>
+  <circle cx="142" cy="296" r="9" fill="#f59e0b"/>
+  <circle cx="172" cy="296" r="9" fill="#22c55e"/>
+  <g font-family="Consolas, 'Courier New', monospace" font-size="28">
+    <text x="112" y="360" fill="#4ade80">$ <tspan fill="#e2e8f0">zplint lint demo.sma</tspan></text>
+    <text x="112" y="410" fill="#f87171">  x L6  set_task_int_interval</text>
+    <text x="112" y="450" fill="#fbbf24">  x L7  write_only_symbol</text>
+    <text x="112" y="490" fill="#f87171">  x L8  abort_call</text>
+    <text x="112" y="530" fill="#f87171">  x L8  api_arity</text>
+    <text x="112" y="580" fill="#e2e8f0">x 4 issue(s) (3 error(s), 1 warning(s))</text>
+  </g>
+</svg>
