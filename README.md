@@ -1,9 +1,18 @@
+<div align="center">
+
+<img src=".github/assets/readme-header.svg" alt="Terminal rodando zplint lint em demo.sma e listando 4 problemas com ids de regra" width="860" />
+
 # zplint
+
+**Linter para plugins Pawn / AMX Mod X: 153 regras, um binário, nada para instalar em runtime.**<br/>
+Pega erro de compilação e padrão que derruba o servidor antes de o plugin subir.
 
 [![CI](https://github.com/juninmd/zplint/actions/workflows/ci.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/ci.yml)
 [![Release](https://github.com/juninmd/zplint/actions/workflows/release.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/release.yml)
 [![Licença](https://img.shields.io/badge/licen%C3%A7a-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#requisitos)
+
+</div>
 
 Linter rápido para plugins **Pawn / AMX Mod X** (`.sma`) de Counter-Strike 1.6, com suporte profundo ao
 **Zombie Plague 5.0**. É feito para quem mantém servidores HLDS e coleções grandes de plugins: encontra,
@@ -26,9 +35,13 @@ binário sem dependências de runtime.
 - [Regras](#regras)
 - [Configuração](#configuração)
 - [Desenvolvimento](#desenvolvimento)
+- [Contribuindo](#contribuindo)
+- [Documentação](#documentação)
 - [Gates de CI](#gates-de-ci)
 - [Terminal e screenshot](#terminal-e-screenshot)
 - [Desempenho](#desempenho)
+- [Segurança](#segurança)
+- [Limitações conhecidas](#limitações-conhecidas)
 - [Licença](#licença)
 
 ## Funcionalidades
@@ -115,6 +128,36 @@ O pacote ainda não está publicado no crates.io (a consulta à API do crates.io
 o roteiro de publicação está em [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
 ## Uso
+
+Ajuda do binário, copiada da saída real de `zplint --help` (build de release 0.4.0, Windows 11):
+
+```text
+Lightning-fast linter for ZP5.0 AMXX plugins
+
+Usage: zplint.exe [FILES]... [COMMAND]
+
+Commands:
+  lint         Lint .sma files (default)
+  lsp          Language Server Protocol over stdio (diagnostics, hover, quick fixes)
+  fmt          Format .sma files (indentation, include order, whitespace)
+  ci           CI mode: read-only, warnings fail the run
+  explain      Print the documentation entry for a rule id
+  rules        List every rule with its category, severity and description
+  watch        Watch mode: re-lint on file changes
+  self-update  Update zplint to the latest GitHub release
+  fix          Apply auto-fixes (safe fixes by default)
+  compile      Compile a .sma plugin to .amxx
+  ast-compare  Lint the given files twice - once through the regex engine, once through the zpc parser - and report the parse rate plus every migrated-rule finding the two paths disagree on
+  disasm       Disassemble a compiled .amxx (or raw .amx) plugin
+  help         Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [FILES]...  Specific .sma files to lint
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
 
 Os exemplos abaixo usam este plugin sintético, `demo.sma` (criado só para esta documentação):
 
@@ -522,9 +565,23 @@ Um detector novo só entra com fonte documentada em [`docs/KNOWLEDGE.md`](docs/K
 nos plugins oficiais do `alliedmodders/amxmodx` e testes que cubram o caso positivo e um quase-acerto que não
 pode disparar.
 
-Outros documentos: [`docs/BIOME_PARITY.md`](docs/BIOME_PARITY.md), [`docs/COMPILER_MIGRATION.md`](docs/COMPILER_MIGRATION.md),
-[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), [`docs/LICENSING.md`](docs/LICENSING.md),
-[`docs/PUBLISHING.md`](docs/PUBLISHING.md), [`CHANGELOG.md`](CHANGELOG.md), [`SECURITY.md`](SECURITY.md).
+## Contribuindo
+
+Use título de PR em Conventional Commits: o `semantic-pr.yml` valida o título, e o squash merge o usa como
+mensagem de commit. Regras completas em [`CONTRIBUTING.md`](CONTRIBUTING.md) e [`AGENTS.md`](AGENTS.md).
+
+## Documentação
+
+| Documento | O que tem |
+|---|---|
+| [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md) | fonte documentada de cada regra |
+| [`docs/BIOME_PARITY.md`](docs/BIOME_PARITY.md) | pesquisa, matriz de lacunas e backlog priorizado |
+| [`docs/COMPILER_MIGRATION.md`](docs/COMPILER_MIGRATION.md) | objetivo, não-objetivos e licenciamento do compilador `zpc` |
+| [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) | divergências deliberadas entre `zpc` e `amxxpc` |
+| [`docs/LICENSING.md`](docs/LICENSING.md) | regras de engenharia que mantêm código GPL fora do repositório |
+| [`docs/PUBLISHING.md`](docs/PUBLISHING.md) | roteiro de publicação no crates.io |
+| [`CHANGELOG.md`](CHANGELOG.md) | histórico de versões |
+| [`SECURITY.md`](SECURITY.md) | política de segurança e reporte de vulnerabilidades |
 
 ## Gates de CI
 
@@ -555,6 +612,24 @@ Números medidos pelo autor com o build de release (rayon, paralelo): 542 arquiv
 74 plugins oficiais do amxmodx em ~0,35 s. Arquivos legados em Windows-1252 são decodificados, não ignorados.
 Esses corpora não estão no repositório, então os números não foram reproduzidos aqui; num único arquivo de
 demonstração o lint levou ~50 ms (ver `docs/terminal.txt`).
+
+## Segurança
+
+O `self-update` baixa o binário do release do GitHub e confere o SHA-256 contra o arquivo `.sha256` publicado no
+mesmo release (`src/self_update.rs`). Para reportar vulnerabilidade, use o canal privado descrito em
+[`SECURITY.md`](SECURITY.md), e não abra issue pública.
+
+## Limitações conhecidas
+
+- O pacote não está publicado no crates.io; instale pelo [GitHub](#instalação).
+- `zplint compile` precisa dos `.inc` do AMX Mod X, que não vêm no repositório. Por isso a saída de `disasm` mostrada
+  neste README não foi verificada (`compile` e `disasm`).
+- O gate de runtime do compilador exige Docker, a imagem do servidor e o core Linux do AMXX 1.10.
+- Os números de desempenho e os corpora de validação (542 plugins ZP, 74 plugins oficiais) são medições do autor e
+  não estão no repositório.
+- O código gerado pelo `compile` não é idêntico, byte a byte, ao do `amxxpc`.
+- Sem argumentos, `zplint lint` varre `meus_plugins_organizados`, o padrão do autor; fora desse caso, passe os caminhos.
+- Um `zplint.toml` inválido é ignorado em silêncio (ver [Configuração](#configuração)).
 
 ## Licença
 
