@@ -3,24 +3,40 @@
 ## Commands
 
 ```bash
-cargo build                    # Debug build
-cargo build --release          # Release build (~0.6s lint time)
-cargo test                     # Run tests
-cargo clippy                   # Lint Rust code
-./target/release/zplint lint   # Lint .sma files
+cargo build --workspace                                # Debug build
+cargo build --release                                  # Release build (~0.6s lint time)
+cargo test --workspace                                 # Run tests (CI gate)
+cargo clippy --workspace --all-targets -- -D warnings  # Lint Rust code (CI gate)
+./target/release/zplint lint <file.sma|dir>            # Lint .sma files
 ```
+
+No `cargo fmt --check` gate: the tree predates rustfmt, do not reformat files you are not touching.
+
+## CI Gates
+
+`.github/workflows/`: `ci.yml` = clippy (`-D warnings`), `cargo test --workspace` on
+ubuntu/windows/macos, MSRV 1.88 (`cargo check --workspace --all-targets`),
+`cargo package --workspace --no-verify`, `cargo audit`. `semantic-pr.yml` = PR title must be a
+Conventional Commit (it becomes the squash commit and drives `release.yml` versioning; `docs:`
+never releases). `security.yml` = shared `juninmd/base-actions` scan.
+
+## README is compiled into the binary
+
+`include_str!("../README.md")` in `src/rule_meta.rs` and `src/main.rs` feeds `zplint rules` and
+`zplint explain`. Never reformat the rule table rows (lines starting with ``| `rule_id` ``) and do
+not put a backticked rule id in prose above the tables (`explain` falls back to the first README
+line that contains it). After touching README.md, rebuild and compare `zplint rules` output.
 
 ## Self-Validation
 
-Always run zplint on itself before committing:
-
 ```bash
-cd /d/Solutions/pessoal/zplint
 cargo build --release
-./target/release/zplint lint
+./target/release/zplint lint crates/zpc/tests/runtime/compiler_smoke.sma
 ```
 
-Expected: 0 issues. If issues are found, fix source before commit.
+Plain `zplint lint` in this repo prints `No .sma files found` (default `paths` is the author-local
+`meus_plugins_organizados`), so it validates nothing here. The release gate in README.md
+(`difftest.mjs`, `runtime-test.ps1`) needs `amxxpc`, AMXX includes and Docker.
 
 ## AMXX Rule References
 
