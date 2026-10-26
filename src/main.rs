@@ -361,15 +361,43 @@ fn list_rules(json: bool) -> i32 {
     0
 }
 
+/// Rule ids tagged on a KNOWLEDGE line, e.g. `[rule: a]` or `[rules: a, b]`.
+fn knowledge_ids(line: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"\[rules?: ([a-z0-9_, ]+)\]").expect("static regex");
+    re.captures_iter(line)
+        .flat_map(|c| c[1].split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+        .collect()
+}
+
+/// Up to three known ids that share a prefix with, or contain, the typo.
+fn suggest_rules(rule: &str) -> Vec<String> {
+    let all = rule_meta::all_rule_ids();
+    let hit = |id: &&String| !rule.is_empty() && (id.starts_with(rule) || id.contains(rule) || rule.starts_with(id.as_str()));
+    all.iter().filter(hit).take(3).cloned().collect()
+}
+
+fn print_explain_header(rule: &str) {
+    println!(
+        "Rule: {rule}\nCategory: {}\nSeverity: {}\nRecommended: {}",
+        rule_meta::category(rule).as_str(),
+        rule_meta::severity(rule),
+        if rule_meta::recommended(rule) { "yes" } else { "no" }
+    );
+}
+
 fn explain(rule: &str) -> i32 {
+    if !rule_meta::all_rule_ids().iter().any(|id| id == rule) {
+        eprintln!("unknown rule '{rule}'. Run `zplint rules` to list every id.");
+        let hints = suggest_rules(rule);
+        if !hints.is_empty() {
+            eprintln!("did you mean: {}?", hints.join(", "));
+        }
+        return 1;
+    }
     let knowledge = include_str!("../docs/KNOWLEDGE.md");
     let lines: Vec<&str> = knowledge.lines().collect();
-    let needle = format!("rule: {rule}");
-    let hits: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.contains(&needle) || l.contains(&format!("rules: {rule}")) || l.contains(&format!(", {rule}")))
-        .map(|(i, _)| i)
+    let hits: Vec<usize> = (0..lines.len())
+        .filter(|&i| knowledge_ids(lines[i]).iter().any(|id| id == rule))
         .collect();
 
     for &hit in &hits {
@@ -385,24 +413,49 @@ fn explain(rule: &str) -> i32 {
             .unwrap_or(lines.len());
         let section = lines[start..end].join("\n").trim().to_string();
         if !section.is_empty() {
-            println!("{section}\n");
-            let sev = if engine::rule_is_warning(rule) { "warning" } else { "error" };
-            println!("Rule: {rule}\nSeverity: {sev}");
+            print_explain_header(rule);
+            println!("\n{section}");
             return 0;
         }
     }
 
     // Fallback: the README tables cover the original 37 detectors.
     let readme = include_str!("../README.md");
-    if let Some(line) = readme.lines().find(|l| l.contains(&format!("`{rule}`"))) {
-        println!("{}\n", line.trim());
-        let sev = if engine::rule_is_warning(rule) { "warning" } else { "error" };
-        println!("Rule: {rule}\nSeverity: {sev}");
-        return 0;
+    print_explain_header(rule);
+    match readme.lines().find(|l| l.contains(&format!("`{rule}`"))) {
+        Some(line) => println!("\n{}", line.trim()),
+        None => println!("\nNo long-form documentation yet; see `zplint rules`."),
+    }
+    0
+}
+
+#[cfg(test)]
+mod explain_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_ids_exactly() {
+        assert_eq!(knowledge_ids("x `[rule: handle_leak]`"), vec!["handle_leak"]);
+        assert_eq!(
+            knowledge_ids("[rules: set_task_int_interval, pev_float_int]"),
+            vec!["set_task_int_interval", "pev_float_int"]
+        );
+        assert!(knowledge_ids("foo, handle").is_empty());
     }
 
-    eprintln!("Unknown rule '{rule}'. Try `zplint explain <rule-id>` with an id printed by a lint run.");
-    1
+    #[test]
+    fn prefix_is_unknown_with_suggestion() {
+        assert_eq!(explain("handle"), 1);
+        assert!(suggest_rules("handle").contains(&"handle_leak".to_string()));
+        assert_eq!(explain("a"), 1);
+    }
+
+    #[test]
+    fn every_known_rule_explains() {
+        for id in rule_meta::all_rule_ids() {
+            assert_eq!(explain(&id), 0, "{id}");
+        }
+    }
 }
 
 /// Corpus-level proof for the AST migration: how many files the parser can
