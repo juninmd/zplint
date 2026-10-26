@@ -429,35 +429,6 @@ fn explain(rule: &str) -> i32 {
     0
 }
 
-#[cfg(test)]
-mod explain_tests {
-    use super::*;
-
-    #[test]
-    fn extracts_ids_exactly() {
-        assert_eq!(knowledge_ids("x `[rule: handle_leak]`"), vec!["handle_leak"]);
-        assert_eq!(
-            knowledge_ids("[rules: set_task_int_interval, pev_float_int]"),
-            vec!["set_task_int_interval", "pev_float_int"]
-        );
-        assert!(knowledge_ids("foo, handle").is_empty());
-    }
-
-    #[test]
-    fn prefix_is_unknown_with_suggestion() {
-        assert_eq!(explain("handle"), 1);
-        assert!(suggest_rules("handle").contains(&"handle_leak".to_string()));
-        assert_eq!(explain("a"), 1);
-    }
-
-    #[test]
-    fn every_known_rule_explains() {
-        for id in rule_meta::all_rule_ids() {
-            assert_eq!(explain(&id), 0, "{id}");
-        }
-    }
-}
-
 /// Corpus-level proof for the AST migration: how many files the parser can
 /// actually handle, and whether it says anything different from the regex rules
 /// on the ones it can.
@@ -520,3 +491,31 @@ fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, un
     }
 }
 
+#[cfg(test)]
+mod explain_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_ids_exactly() {
+        assert_eq!(knowledge_ids("x `[rule: handle_leak]`"), vec!["handle_leak"]);
+        assert_eq!(
+            knowledge_ids("[rules: set_task_int_interval, pev_float_int]"),
+            vec!["set_task_int_interval", "pev_float_int"]
+        );
+        assert!(knowledge_ids("foo, handle").is_empty());
+    }
+
+    #[test]
+    fn prefix_is_unknown_with_suggestion() {
+        assert_eq!(explain("handle"), 1);
+        assert!(suggest_rules("handle").contains(&"handle_leak".to_string()));
+        assert_eq!(explain("a"), 1);
+    }
+
+    #[test]
+    fn every_known_rule_explains() {
+        for id in rule_meta::all_rule_ids() {
+            assert_eq!(explain(&id), 0, "{id}");
+        }
+    }
+}
