@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-29
+
+### Bug Fixes
+
+- **explain:** validar id da regra, casar ids exatos e sugerir correções (#19)
+
 ## [0.4.0] - 2026-10-21
 
 ### Features

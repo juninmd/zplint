@@ -2,7 +2,7 @@
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Antonio Carlos <juninho140695@gmail.com>"]
@@ -13,14 +13,14 @@ keywords = ["pawn", "amxx", "linter", "compiler", "cs16"]
 categories = ["development-tools", "compilers"]
 
 [workspace.dependencies]
-zpc-amxx = { version = "0.4.0", path = "crates/zpc-amxx" }
-zpc-asm = { version = "0.4.0", path = "crates/zpc-asm" }
-zpc-ast = { version = "0.4.0", path = "crates/zpc-ast" }
-zpc-codegen = { version = "0.4.0", path = "crates/zpc-codegen" }
-zpc-diag = { version = "0.4.0", path = "crates/zpc-diag" }
-zpc-lex = { version = "0.4.0", path = "crates/zpc-lex" }
-zpc-parse = { version = "0.4.0", path = "crates/zpc-parse" }
-zpc-sema = { version = "0.4.0", path = "crates/zpc-sema" }
+zpc-amxx = { version = "0.4.1", path = "crates/zpc-amxx" }
+zpc-asm = { version = "0.4.1", path = "crates/zpc-asm" }
+zpc-ast = { version = "0.4.1", path = "crates/zpc-ast" }
+zpc-codegen = { version = "0.4.1", path = "crates/zpc-codegen" }
+zpc-diag = { version = "0.4.1", path = "crates/zpc-diag" }
+zpc-lex = { version = "0.4.1", path = "crates/zpc-lex" }
+zpc-parse = { version = "0.4.1", path = "crates/zpc-parse" }
+zpc-sema = { version = "0.4.1", path = "crates/zpc-sema" }
 
 [package]
 name = "zplint"
