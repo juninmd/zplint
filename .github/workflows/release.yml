@@ -31,7 +31,7 @@ jobs:
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -75,7 +75,7 @@ jobs:
           git push origin HEAD:master "v$next"
           echo "tag=v$next" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.plan.outputs.tag != '' && github.event.inputs.tag == ''
         with:
           name: notes
@@ -100,7 +100,7 @@ jobs:
             target: aarch64-apple-darwin
             exe: ""
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
@@ -131,7 +131,7 @@ jobs:
             (cd stage && tar czf "../dist/$name.tar.gz" "$name")
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
@@ -141,16 +141,16 @@ jobs:
     needs: [prepare, binaries]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: github.event.inputs.tag == ''
         with:
           name: notes
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           files: dist/*
