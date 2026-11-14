@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="390" viewBox="0 0 1280 390">
+  <defs>
+    <linearGradient id="bgFlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1120"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="390" rx="20" fill="url(#bgFlow)" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Header -->
+  <text x="40" y="48" fill="#f8fafc" font-family="'DejaVu Sans', sans-serif" font-size="22" font-weight="700">Semantic Release &amp; Verified Auto Self-Update Pipeline</text>
+  <text x="40" y="72" fill="#94a3b8" font-family="'DejaVu Sans', sans-serif" font-size="14">Conventional commits publish signed release artifacts; interactive CLI invocations keep themselves up to date safely.</text>
+
+  <!-- Step 1 -->
+  <g transform="translate(40, 102)">
+    <rect width="268" height="176" rx="14" fill="#131c31" stroke="#3b82f6" stroke-width="1.4"/>
+    <rect x="16" y="16" width="84" height="24" rx="6" fill="#172554"/>
+    <text x="58" y="32" text-anchor="middle" fill="#93c5fd" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">STEP 1</text>
+    <text x="16" y="68" fill="#f8fafc" font-family="'DejaVu Sans', sans-serif" font-size="18" font-weight="700">Semantic Commit</text>
+    <text x="16" y="94" fill="#cbd5e1" font-family="'DejaVu Sans Mono', monospace" font-size="13">feat: -&gt; minor bump</text>
+    <text x="16" y="116" fill="#cbd5e1" font-family="'DejaVu Sans Mono', monospace" font-size="13">fix:  -&gt; patch bump</text>
+    <text x="16" y="138" fill="#64748b" font-family="'DejaVu Sans Mono', monospace" font-size="13">docs: -&gt; no release</text>
+    <text x="16" y="162" fill="#93c5fd" font-family="'DejaVu Sans', sans-serif" font-size="12">PR squash title drives version</text>
+  </g>
+
+  <!-- Arrow 1->2 -->
+  <path d="M316 190 H342 M335 183 L343 190 L335 197" fill="none" stroke="#64748b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Step 2 -->
+  <g transform="translate(350, 102)">
+    <rect width="268" height="176" rx="14" fill="#131c31" stroke="#a855f7" stroke-width="1.4"/>
+    <rect x="16" y="16" width="84" height="24" rx="6" fill="#3b0764"/>
+    <text x="58" y="32" text-anchor="middle" fill="#d8b4fe" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">STEP 2</text>
+    <text x="16" y="68" fill="#f8fafc" font-family="'DejaVu Sans', sans-serif" font-size="18" font-weight="700">CI Tags &amp; Builds</text>
+    <text x="16" y="94" fill="#cbd5e1" font-family="'DejaVu Sans Mono', monospace" font-size="13">release.yml + release.sh</text>
+    <text x="16" y="116" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Updates Cargo &amp; CHANGELOG</text>
+    <text x="16" y="138" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Publishes Linux/Win/macOS</text>
+    <text x="16" y="162" fill="#d8b4fe" font-family="'DejaVu Sans Mono', monospace" font-size="12">zplint-&lt;target&gt; + .sha256</text>
+  </g>
+
+  <!-- Arrow 2->3 -->
+  <path d="M626 190 H652 M645 183 L653 190 L645 197" fill="none" stroke="#64748b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Step 3 -->
+  <g transform="translate(660, 102)">
+    <rect width="268" height="176" rx="14" fill="#131c31" stroke="#f97316" stroke-width="1.4"/>
+    <rect x="16" y="16" width="84" height="24" rx="6" fill="#431407"/>
+    <text x="58" y="32" text-anchor="middle" fill="#fdba74" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">STEP 3</text>
+    <text x="16" y="68" fill="#f8fafc" font-family="'DejaVu Sans', sans-serif" font-size="18" font-weight="700">24h Cache Check</text>
+    <text x="16" y="94" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">3s GitHub API timeout</text>
+    <text x="16" y="116" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Silent fallback if offline</text>
+    <text x="16" y="138" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Respects check_interval_hours</text>
+    <text x="16" y="162" fill="#fdba74" font-family="'DejaVu Sans Mono', monospace" font-size="12">last_update_check cache</text>
+  </g>
+
+  <!-- Arrow 3->4 -->
+  <path d="M936 190 H962 M955 183 L963 190 L955 197" fill="none" stroke="#64748b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Step 4 -->
+  <g transform="translate(970, 102)">
+    <rect width="270" height="176" rx="14" fill="#131c31" stroke="#10b981" stroke-width="1.4"/>
+    <rect x="16" y="16" width="84" height="24" rx="6" fill="#064e3b"/>
+    <text x="58" y="32" text-anchor="middle" fill="#6ee7b7" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">STEP 4</text>
+    <text x="16" y="68" fill="#f8fafc" font-family="'DejaVu Sans', sans-serif" font-size="18" font-weight="700">Verify &amp; Swap</text>
+    <text x="16" y="94" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Downloads .sha256 sidecar</text>
+    <text x="16" y="116" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Aborts on hash mismatch</text>
+    <text x="16" y="138" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Atomically swaps binary</text>
+    <text x="16" y="162" fill="#6ee7b7" font-family="'DejaVu Sans Mono', monospace" font-size="12">apply | notify via stderr</text>
+  </g>
+
+  <!-- Safe Bypass Footer Bar -->
+  <rect x="40" y="302" width="1200" height="58" rx="12" fill="#0f172a" stroke="#334155" stroke-width="1.2"/>
+  <text x="64" y="336" fill="#fbbf24" font-family="'DejaVu Sans', sans-serif" font-size="14" font-weight="700">Safe Bypass Guards:</text>
+  <g font-family="'DejaVu Sans Mono', monospace" font-size="13">
+    <rect x="242" y="317" width="118" height="28" rx="6" fill="#1e293b"/>
+    <text x="301" y="336" text-anchor="middle" fill="#e2e8f0">zplint lsp</text>
+
+    <rect x="372" y="317" width="108" height="28" rx="6" fill="#1e293b"/>
+    <text x="426" y="336" text-anchor="middle" fill="#e2e8f0">zplint ci</text>
+
+    <rect x="492" y="317" width="154" height="28" rx="6" fill="#1e293b"/>
+    <text x="569" y="336" text-anchor="middle" fill="#e2e8f0">CI / GH_ACTIONS</text>
+
+    <rect x="658" y="317" width="178" height="28" rx="6" fill="#1e293b"/>
+    <text x="747" y="336" text-anchor="middle" fill="#e2e8f0">--json / --reporter</text>
+
+    <rect x="848" y="317" width="174" height="28" rx="6" fill="#1e293b"/>
+    <text x="935" y="336" text-anchor="middle" fill="#e2e8f0">--no-auto-update</text>
+
+    <rect x="1034" y="317" width="184" height="28" rx="6" fill="#1e293b"/>
+    <text x="1126" y="336" text-anchor="middle" fill="#e2e8f0">target/{debug,rel}</text>
+  </g>
+</svg>

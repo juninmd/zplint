@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="410" viewBox="0 0 1280 410">
+  <defs>
+    <linearGradient id="bgBench" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1120"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="barGreen" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+    <linearGradient id="barOrange" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ea580c"/>
+      <stop offset="100%" stop-color="#fb923c"/>
+    </linearGradient>
+    <linearGradient id="barBlue" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#60a5fa"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="410" rx="20" fill="url(#bgBench)" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Left Panel: Official AMXX Corpus -->
+  <g transform="translate(36, 32)">
+    <rect width="588" height="346" rx="16" fill="#131c31" stroke="#10b981" stroke-opacity="0.5" stroke-width="1.5"/>
+    <rect x="24" y="24" width="210" height="26" rx="6" fill="#064e3b"/>
+    <text x="129" y="42" text-anchor="middle" fill="#6ee7b7" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">OFFICIAL BASELINE</text>
+
+    <text x="24" y="80" fill="#f8fafc" font-family="'DejaVu Sans', sans-serif" font-size="22" font-weight="700">alliedmodders/amxmodx (48 .sma)</text>
+    <text x="24" y="104" fill="#94a3b8" font-family="'DejaVu Sans', sans-serif" font-size="14">Non-testsuite bundled plugins — zero false-positive errors gate</text>
+
+    <!-- Metric Row 1 -->
+    <text x="24" y="148" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="15" font-weight="700">False-Positive Errors</text>
+    <text x="564" y="148" text-anchor="end" fill="#34d399" font-family="'DejaVu Sans Mono', monospace" font-size="15" font-weight="700">0 errors (100% pass)</text>
+    <rect x="24" y="160" width="540" height="12" rx="6" fill="#1e293b"/>
+    <rect x="24" y="160" width="540" height="12" rx="6" fill="url(#barGreen)"/>
+
+    <!-- Metric Row 2 -->
+    <text x="24" y="206" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="15" font-weight="700">AMXX 1.10 Compilation (zpc)</text>
+    <text x="564" y="206" text-anchor="end" fill="#34d399" font-family="'DejaVu Sans Mono', monospace" font-size="15" font-weight="700">48 / 48 compiled</text>
+    <rect x="24" y="218" width="540" height="12" rx="6" fill="#1e293b"/>
+    <rect x="24" y="218" width="540" height="12" rx="6" fill="url(#barGreen)"/>
+
+    <!-- Metric Row 3 -->
+    <text x="24" y="264" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="15" font-weight="700">AST Clean Parse &amp; Divergence</text>
+    <text x="564" y="264" text-anchor="end" fill="#60a5fa" font-family="'DejaVu Sans Mono', monospace" font-size="15" font-weight="700">68.8% parsed · 0 divergences</text>
+    <rect x="24" y="276" width="540" height="12" rx="6" fill="#1e293b"/>
+    <rect x="24" y="276" width="372" height="12" rx="6" fill="url(#barBlue)"/>
+
+    <!-- Footer Pill -->
+    <rect x="24" y="302" width="540" height="28" rx="8" fill="#0f172a"/>
+    <text x="294" y="321" text-anchor="middle" fill="#cbd5e1" font-family="'DejaVu Sans Mono', monospace" font-size="13">Total wall time: 1.14 s (~24 ms/file) · 123 warnings</text>
+  </g>
+
+  <!-- Right Panel: Community Corpus -->
+  <g transform="translate(656, 32)">
+    <rect width="588" height="346" rx="16" fill="#131c31" stroke="#f97316" stroke-opacity="0.5" stroke-width="1.5"/>
+    <rect x="24" y="24" width="234" height="26" rx="6" fill="#431407"/>
+    <text x="141" y="42" text-anchor="middle" fill="#fdba74" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">WILD CORPUS STRESS TEST</text>
+
+    <text x="24" y="80" fill="#f8fafc" font-family="'DejaVu Sans', sans-serif" font-size="22" font-weight="700">40 GitHub Packs (1,013 .sma)</text>
+    <text x="24" y="104" fill="#94a3b8" font-family="'DejaVu Sans', sans-serif" font-size="14">ZP 4.3 / 5.0 / ReZP, Deathrun, JailBreak, CTF, ReDM, PugMod</text>
+
+    <!-- Stat Grid 2x2 -->
+    <rect x="24" y="130" width="260" height="74" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="42" y="160" fill="#34d399" font-family="'DejaVu Sans Mono', monospace" font-size="26" font-weight="700">0 panics</text>
+    <text x="42" y="186" fill="#94a3b8" font-family="'DejaVu Sans', sans-serif" font-size="13">100% crash-free across 1,013 files</text>
+
+    <rect x="304" y="130" width="260" height="74" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="322" y="160" fill="#fb923c" font-family="'DejaVu Sans Mono', monospace" font-size="26" font-weight="700">46.5 s</text>
+    <text x="322" y="186" fill="#94a3b8" font-family="'DejaVu Sans', sans-serif" font-size="13">~46 ms/file via rayon parallelism</text>
+
+    <rect x="24" y="216" width="260" height="74" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="42" y="246" fill="#60a5fa" font-family="'DejaVu Sans Mono', monospace" font-size="26" font-weight="700">1,210</text>
+    <text x="42" y="272" fill="#94a3b8" font-family="'DejaVu Sans', sans-serif" font-size="13">Auto-fixable diagnostics flagged</text>
+
+    <rect x="304" y="216" width="260" height="74" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="322" y="246" fill="#c084fc" font-family="'DejaVu Sans Mono', monospace" font-size="26" font-weight="700">297 clean</text>
+    <text x="322" y="272" fill="#94a3b8" font-family="'DejaVu Sans', sans-serif" font-size="13">2,117 errors · 5,889 warnings found</text>
+
+    <!-- Footer Pill -->
+    <rect x="24" y="302" width="540" height="28" rx="8" fill="#0f172a"/>
+    <text x="294" y="321" text-anchor="middle" fill="#fdba74" font-family="'DejaVu Sans Mono', monospace" font-size="13">Verified 0 duplicate_global false positives remaining</text>
+  </g>
+</svg>

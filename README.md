@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/assets/readme-header.svg" alt="Terminal running zplint lint on demo.sma and reporting diagnostics with rule ids" width="860" />
+<img src=".github/assets/zplint-logo.png" alt="zplint emblem logo" width="112" />
 
 # zplint
 
@@ -11,13 +11,21 @@ Catch compiler errors, HLDS server crashes, engine limit overruns, and Zombie Pl
 [![Release](https://github.com/juninmd/zplint/actions/workflows/release.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](#requirements)
-[![Rules](https://img.shields.io/badge/rules-165-emerald.svg)](#rules)
+[![Rules](https://img.shields.io/badge/rules-165-10b981.svg)](#rules)
+[![Auto Update](https://img.shields.io/badge/self--update-enabled%20by%20default-f97316.svg)](#auto-self-update)
+
+[Installation](#installation) · [Auto Self-Update](#auto-self-update) · [Feature Guide](#how-to-enable-and-use-every-feature) · [Configuration](#configuration-zplinttoml) · [165 Rules](#rules) · [Benchmarks](#corpus-validation--performance)
+
+<br/>
+
+<img src=".github/assets/readme-header.svg" alt="zplint CLI showcasing demo.sma diagnostics with rule ids" width="880" />
 
 </div>
 
 `zplint` is built in **Rust** for Counter-Strike 1.6 and GoldSrc/HLDS maintainers managing individual `.sma` scripts or large **AMX Mod X** and **Zombie Plague 5.0** server packs. With zero runtime dependencies (no Python, Node.js, or external compiler required to lint), it pairs a regex/API-table analyzer with an AST and semantic front-end (`zpc`) powered by rayon parallelism.
 
-## Table of Contents
+<details>
+<summary>Table of Contents</summary>
 
 - [Highlights](#highlights)
 - [Requirements](#requirements)
@@ -47,7 +55,18 @@ Catch compiler errors, HLDS server crashes, engine limit overruns, and Zombie Pl
 - [Known Limitations](#known-limitations)
 - [License](#license)
 
+</details>
+
 ## Highlights
+
+<div align="center">
+
+<img src=".github/assets/toolchain-overview.svg" alt="zplint six toolchain pillars: Linter, Auto-Fix & Formatter, LSP, Compiler & Disassembler, CI Reporters, Auto Self-Update" width="880" />
+
+</div>
+
+<details>
+<summary>Capability Matrix (CLI Commands &amp; Scope)</summary>
 
 | Capability | Command / Mode | What it gives you |
 |---|---|---|
@@ -61,6 +80,8 @@ Catch compiler errors, HLDS server crashes, engine limit overruns, and Zombie Pl
 | **CI Reporters & Git Diff** | `--reporter`, `--changed`, `--staged` | Native `default`, `json`, `github`, `sarif`, and `junit` formats + git-scoped scanning |
 | **Compiler & Disassembler** | `zplint compile`, `zplint disasm` | Compiles `.sma` to AMXX 1.10 `.amxx` binaries and disassembles `.amxx`/`.amx` bytecode |
 | **Auto Self-Update** | Automatic + `zplint self-update` | Daily checksum-verified binary updates from GitHub Releases with zero-config setup |
+
+</details>
 
 ## Requirements
 
@@ -133,6 +154,12 @@ cargo build --release
 ## Auto Self-Update
 
 **Automatic self-update is enabled by default** in `zplint` when installed as a standalone CLI binary.
+
+<div align="center">
+
+<img src=".github/assets/auto-update-flow.svg" alt="Semantic commit to CI release to 24h cache check to SHA-256 verified binary swap" width="880" />
+
+</div>
 
 ### How it works
 
@@ -325,6 +352,12 @@ zplint fmt --write plugins/              # format files in place
 
 ### Editor LSP Integration
 
+<div align="center">
+
+<img src=".github/assets/lsp-and-autofix.svg" alt="zplint lsp hover documentation and code actions alongside zplint fix and fmt diff" width="880" />
+
+</div>
+
 Start the built-in Language Server over stdio with `zplint lsp`. It supports:
 
 - Live diagnostics as you type (`textDocument/didOpen`, `didChange`, `didSave`)
@@ -504,6 +537,12 @@ flowchart LR
 ```
 
 ## Corpus Validation & Performance
+
+<div align="center">
+
+<img src=".github/assets/corpus-validation.svg" alt="zplint benchmark results across 48 official AMXX plugins and 1,013 community ZP/AMXX plugins" width="880" />
+
+</div>
 
 Measured locally with the release build (`rayon` parallel execution) across two corpora:
 
