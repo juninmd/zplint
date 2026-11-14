@@ -129,7 +129,9 @@ pub fn category(id: &str) -> Category {
         | "get_players_flags"
         | "find_player_flags"
         | "read_data_bounds"
-        | "api_deprecated" => Category::Suspicious,
+        | "api_deprecated"
+        | "nested_comment"
+        | "cvar_pointer_null" => Category::Suspicious,
 
         _ => Category::Correctness,
     }

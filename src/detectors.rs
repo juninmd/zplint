@@ -698,6 +698,205 @@ fn is_user_controlled(body_sq: &str, ident: &str) -> bool {
             .is_ok_and(|re| re.is_match(body_sq))
 }
 
+static RE_CVAR_PTR_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(?:new\s+(?:const\s+)?)?(?:[A-Za-z_]\w*:)?([A-Za-z_]\w*)\s*=\s*get_cvar_pointer\s*\(").unwrap()
+});
+
+static PATH_TRAVERSAL_SINKS: &[(&str, usize)] = &[
+    ("fopen", 0),
+    ("read_file", 0),
+    ("write_file", 0),
+    ("delete_file", 0),
+    ("file_exists", 0),
+    ("dir_exists", 0),
+    ("rmdir", 0),
+    ("mkdir", 0),
+    ("unlink", 0),
+    ("file_size", 0),
+    ("rename_file", 0),
+    ("rename_file", 1),
+];
+
+/// Detect nested `/*` inside an active `/* ... */` block comment on the raw source
+/// (before `strip_block_comments` strips it). Respects `//` (including `//*`),
+/// string literals, and `#pragma ctrlchar '\'`.
+pub(crate) fn detect_nested_comments(
+    raw: &str,
+    config: &RulesConfig,
+    issues: &mut Vec<crate::rules::LintIssue>,
+) {
+    if !config.enabled("nested_comment") {
+        return;
+    }
+    let esc = if raw.contains(r"#pragma ctrlchar '\'") { '\\' } else { '^' };
+    let mut chars = raw.chars().peekable();
+    let mut lineno = 1usize;
+    let mut in_block = false;
+    let mut reported_in_block = false;
+    let mut in_line = false;
+    let mut in_str = false;
+    let mut in_char = false;
+
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            lineno += 1;
+            in_line = false;
+            in_str = false;
+            in_char = false;
+            continue;
+        }
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+                reported_in_block = false;
+            } else if c == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                if !reported_in_block {
+                    issues.push(iss(
+                        lineno,
+                        "nested '/*' inside a block comment (warning 216) - block comments do not nest cleanly in Pawn; close the outer comment first".into(),
+                        "nested_comment",
+                        false,
+                    ));
+                    reported_in_block = true;
+                }
+            }
+            continue;
+        }
+        if in_line {
+            continue;
+        }
+        if in_str {
+            if c == esc && chars.peek() != Some(&'\n') {
+                chars.next();
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if in_char {
+            if c == esc && chars.peek() != Some(&'\n') {
+                chars.next();
+            } else if c == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '\'' => in_char = true,
+            '/' if chars.peek() == Some(&'/') => {
+                chars.next();
+                in_line = true;
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                in_block = true;
+                reported_in_block = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Count parameters in the definition of `handler` (top-level only, definition
+/// header across lines if needed). Returns `None` if no non-prototype definition
+/// of `handler` exists in `lines`.
+fn handler_def_param_count(lines: &[&str], sanitized: &[(String, bool)], handler: &str) -> Option<(usize, usize)> {
+    let re = Regex::new(&format!(
+        r"^\s*(?:(?:public|stock|static)\s+)*(?:[A-Za-z_]\w*:)?{}\s*\(",
+        regex::escape(handler)
+    ))
+    .ok()?;
+    for (idx, (san, _)) in sanitized.iter().enumerate() {
+        let Some(m) = re.find(san) else { continue };
+        // Combine lines until the matching `)` closes at depth 0
+        let mut combined = String::new();
+        let mut started = false;
+        let mut depth = 0i32;
+        let mut after_paren = String::new();
+        let mut finished = false;
+        for (offset_line, (s, _)) in sanitized.iter().enumerate().skip(idx) {
+            let slice = if offset_line == idx { &s[m.end() - 1..] } else { s.as_str() };
+            for (ci, ch) in slice.char_indices() {
+                if !started {
+                    if ch == '(' {
+                        started = true;
+                        depth = 1;
+                    }
+                    continue;
+                }
+                match ch {
+                    '(' => {
+                        depth += 1;
+                        combined.push(ch);
+                    }
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            after_paren = slice[ci + 1..].to_string();
+                            finished = true;
+                            break;
+                        }
+                        combined.push(ch);
+                    }
+                    _ => combined.push(ch),
+                }
+            }
+            if finished {
+                break;
+            }
+            combined.push(' ');
+        }
+        if !finished {
+            continue;
+        }
+        let trimmed_after = after_paren.trim();
+        // Skip forward declarations (`forward foo(...);`) or expressions
+        if trimmed_after.starts_with(';') {
+            continue;
+        }
+        let next_nonempty = trimmed_after.chars().next().or_else(|| {
+            lines
+                .get(idx + 1..)
+                .and_then(|rest| rest.iter().find_map(|l| l.trim().chars().next()))
+        });
+        if trimmed_after.is_empty() || next_nonempty == Some('{') || trimmed_after.starts_with('{') {
+            let params_trimmed = combined.trim();
+            let count = if params_trimmed.is_empty() {
+                0
+            } else {
+                split_top_level(params_trimmed, ',').len()
+            };
+            return Some((idx + 1, count));
+        }
+    }
+    None
+}
+
+fn is_user_controlled_for_path(body_sq: &str, ident: &str) -> bool {
+    if is_user_controlled(body_sq, ident) {
+        return true;
+    }
+    Regex::new(&format!(r"read_argv\([^,]+,{}\b", regex::escape(ident)))
+        .is_ok_and(|re| re.is_match(body_sq))
+}
+
+fn has_path_traversal_check(body: &str, body_sq: &str) -> bool {
+    body_sq.contains("replace")
+        || body_sq.contains("contain")
+        || body_sq.contains("strfind")
+        || body_sq.contains("isalnum")
+        || body_sq.contains("isalpha")
+        || body_sq.contains("isdigit")
+        || body.contains("\"..\"")
+        || body.contains("'/'")
+        || body.contains("'\\'")
+        || body.contains("'^\\'")
+        || body.contains("'\\\\'")
+}
+
 /// `if (!h) return` / `if (h == 0) return` is the correct early exit after a
 /// failed allocation, not a leak path.
 fn guarded_invalid_return(line: &str, prev: &str, var: &str) -> bool {
@@ -1923,9 +2122,145 @@ pub fn run(raw_clean: &str, lines: &[&str], config: &RulesConfig, issues: &mut V
                 }
             }
         }
+
+        // --- cvar_pointer_null ---
+        if config.enabled("cvar_pointer_null")
+            && depth_before[i] > 0
+            && !san_trim.starts_with("if")
+            && !san_trim.starts_with("while")
+            && !san_trim.starts_with("else")
+            && let Some(caps) = RE_CVAR_PTR_ASSIGN.captures(san)
+        {
+            let var = caps.get(1).unwrap().as_str();
+            if san_trim.starts_with("new ") || !globals.contains(var) {
+                let body = enclosing_body(lines, i);
+                let body_sq = squash(&body);
+                let derefs = Regex::new(&format!(
+                    r"\b(?:(?:get|set|bind)_pcvar_\w+|hook_cvar_change)\s*\(\s*{}\b",
+                    regex::escape(var)
+                ))
+                .is_ok_and(|re| re.is_match(&body));
+                if derefs {
+                    let flat = body_sq.replace('\n', "");
+                    let checked = [
+                        format!("if({})", var),
+                        format!("if(!{})", var),
+                        format!("if({}&&", var),
+                        format!("if({}||", var),
+                        format!("if(!{}&&", var),
+                        format!("if(!{}||", var),
+                        format!("&&{})", var),
+                        format!("&&!{})", var),
+                        format!("&&{}&&", var),
+                        format!("&&!{}&&", var),
+                        format!("||{})", var),
+                        format!("||!{})", var),
+                        format!("||{}||", var),
+                        format!("||!{}||", var),
+                        format!("{}==0", var),
+                        format!("0=={}", var),
+                        format!("{}!=0", var),
+                        format!("0!={}", var),
+                        format!("{}>0", var),
+                        format!("0<{}", var),
+                        format!("{}<1", var),
+                        format!("{}<=0", var),
+                        format!("0>={}", var),
+                        format!("{}>=1", var),
+                        format!("1<={}", var),
+                        format!("{}?", var),
+                        format!("{}==INVALID_HANDLE", var),
+                        format!("{}!=INVALID_HANDLE", var),
+                    ]
+                    .iter()
+                    .any(|p| flat.contains(p));
+                    if !checked {
+                        issues.push(iss(
+                            lineno,
+                            format!("get_cvar_pointer() result '{}' is passed to pcvar natives without checking for 0 (invalid cvar pointer causes runtime error)", var),
+                            "cvar_pointer_null",
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // --- path_traversal ---
+        if config.enabled("path_traversal") && depth_before[i] > 0 {
+            let mut reported_vars: HashSet<String> = HashSet::new();
+            for &(native, arg_idx) in PATH_TRAVERSAL_SINKS {
+                for args in extract_call_args(san, native) {
+                    let Some(arg) = args.get(arg_idx).map(|s| s.trim()) else { continue };
+                    if !RE_IDENT_ONLY.is_match(arg) || reported_vars.contains(arg) {
+                        continue;
+                    }
+                    let body = enclosing_body(lines, i);
+                    let body_sq = squash(&body);
+                    let direct_taint = is_user_controlled_for_path(&body_sq, arg);
+                    let formatted_taint = !direct_taint
+                        && (extract_call_args(&body, "format")
+                            .into_iter()
+                            .chain(extract_call_args(&body, "formatex"))
+                            .any(|fargs| {
+                                fargs.first().is_some_and(|d| d.trim() == arg)
+                                    && fargs.iter().skip(3).any(|a| {
+                                        let t = a.trim();
+                                        RE_IDENT_ONLY.is_match(t)
+                                            && is_user_controlled_for_path(&body_sq, t)
+                                    })
+                            })
+                            || extract_call_args(&body, "copy").into_iter().any(|cargs| {
+                                cargs.first().is_some_and(|d| d.trim() == arg)
+                                    && cargs.get(2).is_some_and(|a| {
+                                        let t = a.trim();
+                                        RE_IDENT_ONLY.is_match(t)
+                                            && is_user_controlled_for_path(&body_sq, t)
+                                    })
+                            }));
+                    if (direct_taint || formatted_taint) && !has_path_traversal_check(&body, &body_sq) {
+                        reported_vars.insert(arg.to_string());
+                        issues.push(iss(
+                            lineno,
+                            format!("{}() path '{}' derives from player input without traversal checks ('..', '/', '\\\\', replace/contain) - crafted input can escape the intended directory", native, arg),
+                            "path_traversal",
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     // ---------- file-level post-passes ----------
+
+    if config.enabled("sql_thread_signature") {
+        let mut checked_handlers: HashSet<(usize, String)> = HashSet::new();
+        for raw_line in &raw_lines {
+            for args in extract_call_args(raw_line, "SQL_ThreadQuery") {
+                let Some(arg1) = args.get(1).map(|s| s.trim()) else { continue };
+                if !(arg1.len() >= 2 && arg1.starts_with('"') && arg1.ends_with('"')) {
+                    continue;
+                }
+                let handler = &arg1[1..arg1.len() - 1];
+                if !RE_IDENT_ONLY.is_match(handler) {
+                    continue;
+                }
+                if let Some((def_line, param_count)) =
+                    handler_def_param_count(lines, &sanitized, handler)
+                    && param_count > 7
+                    && checked_handlers.insert((def_line, handler.to_string()))
+                {
+                    issues.push(iss(
+                        def_line,
+                        format!("SQL_ThreadQuery handler '{}' declares {} parameters, but SQL_ThreadQuery forwards at most 7 (failstate, Handle:query, error[], errnum, data[], size, Float:queuetime)", handler, param_count),
+                        "sql_thread_signature",
+                        false,
+                    ));
+                }
+            }
+        }
+    }
 
     if config.enabled("unbalanced_preprocessor") {
         let mut stack: Vec<usize> = Vec::new();
@@ -3239,5 +3574,69 @@ mod tests {
         assert!(r.contains(&"handle_use_after_destroy"));
         let ok = lint_str("huad2", "public f() {\n\tnew Handle:h = SQL_Connect(t, e, err, 255);\n\tSQL_Execute(h);\n\tSQL_FreeHandle(h);\n}\n");
         assert!(!ok.contains(&"handle_use_after_destroy"));
+    }
+
+    #[test]
+    fn nested_comment_rule() {
+        let bad = lint_str("nc1", "/* outer /* inner */\npublic f() {}\n");
+        assert!(bad.contains(&"nested_comment"));
+        // Pawn's `//*` is a single-line comment, not an open block comment; strings stay ignored too.
+        let ok = lint_str(
+            "nc2",
+            "//* banner /* not nested\npublic f() {\n\tnew s[] = \"/* literal /*\";\n}\n/* clean */\n",
+        );
+        assert!(!ok.contains(&"nested_comment"));
+    }
+
+    #[test]
+    fn sql_thread_signature_rule() {
+        let bad = lint_str(
+            "sqlsig1",
+            "public f(Handle:t) {\n\tSQL_ThreadQuery(t, \"qh\", \"SELECT 1\");\n}\npublic qh(fs, Handle:q, err[], errnum, data[], size, Float:qt, extra) {\n}\n",
+        );
+        assert!(bad.contains(&"sql_thread_signature"));
+        let ok = lint_str(
+            "sqlsig2",
+            "public f(Handle:t) {\n\tSQL_ThreadQuery(t, \"qh\", \"SELECT 1\");\n}\npublic qh(fs, Handle:q, err[], errnum, data[], size, Float:qt) {\n}\n",
+        );
+        assert!(!ok.contains(&"sql_thread_signature"));
+    }
+
+    #[test]
+    fn cvar_pointer_null_rule() {
+        let bad = lint_str(
+            "cvarnull1",
+            "public f() {\n\tnew p = get_cvar_pointer(\"sv_gravity\");\n\treturn get_pcvar_num(p);\n}\n",
+        );
+        assert!(bad.contains(&"cvar_pointer_null"));
+        let ok = lint_str(
+            "cvarnull2",
+            "public f() {\n\tnew p = get_cvar_pointer(\"sv_gravity\");\n\tif (!p) return 0;\n\treturn get_pcvar_num(p);\n}\n",
+        );
+        assert!(!ok.contains(&"cvar_pointer_null"));
+        let ok_cond = lint_str(
+            "cvarnull3",
+            "public f() {\n\tnew p = get_cvar_pointer(\"sv_gravity\");\n\tif (p && get_pcvar_num(p)) return 1;\n\treturn 0;\n}\n",
+        );
+        assert!(!ok_cond.contains(&"cvar_pointer_null"));
+    }
+
+    #[test]
+    fn path_traversal_rule() {
+        let bad_direct = lint_str(
+            "pathtrav1",
+            "public cmd_cfg(id) {\n\tnew arg[64];\n\tread_argv(1, arg, charsmax(arg));\n\tnew fp = fopen(arg, \"r\");\n\tif (fp) fclose(fp);\n}\n",
+        );
+        assert!(bad_direct.contains(&"path_traversal"));
+        let bad_fmt = lint_str(
+            "pathtrav2",
+            "public cmd_cfg(id) {\n\tnew name[32], path[128];\n\tget_user_name(id, name, charsmax(name));\n\tformatex(path, charsmax(path), \"addons/amxmodx/data/%s.txt\", name);\n\tdelete_file(path);\n}\n",
+        );
+        assert!(bad_fmt.contains(&"path_traversal"));
+        let ok = lint_str(
+            "pathtrav3",
+            "public cmd_cfg(id) {\n\tnew arg[64], path[128];\n\tread_argv(1, arg, charsmax(arg));\n\tif (contain(arg, \"..\") != -1) return;\n\tformatex(path, charsmax(path), \"addons/amxmodx/data/%s.txt\", arg);\n\tdelete_file(path);\n}\n",
+        );
+        assert!(!ok.contains(&"path_traversal"));
     }
 }

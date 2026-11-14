@@ -264,14 +264,10 @@ impl Tags {
         // Upstream nests these; collapsed here only because clippy insists. The
         // outer condition is "the tags are not trivially compatible", the inner
         // one is "and coercion cannot rescue them".
-        if formal != actual
+        !(formal != actual
             && formal != self.any
             && actual != self.any
-            && (coerce == Coercion::Deny || !formal.is_untagged() || actual.is_strong())
-        {
-            return false;
-        }
-        true
+            && (coerce == Coercion::Deny || !formal.is_untagged() || actual.is_strong()))
     }
 
     /// `checktag()`: true when *any* tag of a multi-tag formal matches. Always

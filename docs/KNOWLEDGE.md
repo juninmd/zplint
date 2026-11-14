@@ -1078,3 +1078,99 @@ binary and platform; the bundled includes do not ship a verified offset table. A
 detector would need a curated table per mod (CS 1.6, CZ, HL) and Windows/Linux variants, so it
 is deliberately deferred rather than guessed. The existing `entity_ev_type_mismatch` covers
 the equivalent `EV_*` family for the Engine module, where the prefix is part of the constant.
+
+---
+
+## 11. Compiler-parity, contract, performance, security and style rules
+
+### 11.1 Duplicate top-level/same-scope symbol (error 021) `[rule: duplicate_global]`
+Declaring the same variable, constant, enum, or function twice in the same scope triggers `amxxpc`
+error 021 (`symbol already defined: "%s"`), commonly caused by copy-paste or bad merge conflict
+resolution. Forward/native prototypes followed by a matching definition are valid in Pawn and
+are merged automatically by `zpc_sema::SymbolTable` without error. Error.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp ·
+https://www.compuphase.com/pawn/pawnfeatures.htm
+
+### 11.2 `sizeof` on a function symbol (error 072) `[rule: sizeof_function]`
+`sizeof` measures cell storage of a variable or array. Applying `sizeof` to a function or native
+name is illegal in Pawn (`amxxpc` error 072: `"sizeof" operator is invalid on "function" symbols`)
+and almost always indicates a name collision or missing variable declaration. Error.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp ·
+https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc3.c
+
+### 11.3 Mixed array and non-array returns (error 079) `[rule: mixed_array_return]`
+Pawn requires all `return` paths in a function to return either an array of matching shape or a
+scalar. Returning an array or string on one branch and an integer/scalar on another fails
+compilation with `amxxpc` error 079 (`inconsistent return types (array & non-array)`). Error.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp ·
+https://www.compuphase.com/pawn/pawn-lang.pdf
+
+### 11.4 In-file function arity mismatch (warning 202 / error 092) `[rule: in_file_arity]`
+`api_arity` validates calls against AMXX bundled includes, while calls to functions defined
+inside the same `.sma` file are validated from the parsed signature table (required parameters vs
+parameters with defaults vs `...` variadics). Passing too few or too many arguments fails
+compilation (`warning 202` / `error 092`). Warning.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp ·
+https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc3.c
+
+### 11.5 Nested block comment (warning 216) `[rule: nested_comment]`
+Pawn does not support nested `/* ... */` comments (`amxxpc` warning 216). Writing `/*` inside an
+already open block comment causes the first `*/` to terminate the entire comment prematurely,
+exposing commented-out code to the compiler or corrupting diagnostics. Detection respects `//*`
+line comments, string/char literals, and `#pragma ctrlchar`. Warning.
+Sources: https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc5-in.scp ·
+https://github.com/alliedmodders/amxmodx/blob/master/compiler/libpc300/sc2.c
+
+### 11.6 `SQL_ThreadQuery` callback signature `[rule: sql_thread_signature]`
+`sqlx.inc` documents the `SQL_ThreadQuery` handler contract as at most 7 parameters:
+`public QueryHandler(failstate, Handle:query, error[], errnum, data[], size, Float:queuetime)`.
+AMXX allows omitting trailing parameters, but declaring more than 7 parameters reads uninitialized
+AMX stack memory and raises run time error 10. Error.
+Sources: https://www.amxmodx.org/api/sqlx/SQL_ThreadQuery ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/sqlx.inc
+
+### 11.7 Unchecked local `get_cvar_pointer()` result `[rule: cvar_pointer_null]`
+`get_cvar_pointer()` returns `0` when the named cvar does not exist (`cvars.inc`). Passing a `0`
+pointer to `get_pcvar_*`, `set_pcvar_*`, `bind_pcvar_*`, or `hook_cvar_change` raises run time
+error 10 (`Invalid cvar pointer`). Guard local `get_cvar_pointer()` results against `0` before
+dereferencing them. Warning.
+Sources: https://www.amxmodx.org/api/cvars/get_cvar_pointer ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/cvars.inc
+
+### 11.8 Path traversal with user-controlled file paths `[rule: path_traversal]`
+Passing input from `read_argv`, `read_args`, `get_user_name`, or `get_user_authid` directly
+(or formatted via `format`/`formatex`/`copy`) into file natives (`fopen`, `read_file`,
+`write_file`, `delete_file`, `file_exists`, `rmdir`, `mkdir`, `rename_file`) without rejecting
+`..`, `/`, or `\` lets callers read, overwrite, or delete arbitrary files outside the intended
+directory. Warning.
+Sources: https://www.amxmodx.org/api/file/fopen ·
+https://owasp.org/www-community/attacks/Path_Traversal
+
+### 11.9 `ArraySize()` inside a loop condition `[rule: array_size_in_loop]`
+Calling `ArraySize(handle)` in a `for` or `while` condition repeats a native boundary call on
+every iteration when the loop body does not mutate the dynamic array. Hoist `new count = ArraySize(handle)`
+before the loop. Warning.
+Sources: https://www.amxmodx.org/api/cellarray/ArraySize ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/cellarray.inc
+
+### 11.10 `get_players()` inside a loop `[rule: get_players_in_loop]`
+`get_players()` / `get_players_ex()` scan all 32 client slots on each invocation. Calling them
+inside a loop multiplies work to O(n * 32) iterations; collect the player array once before the loop.
+Warning.
+Sources: https://www.amxmodx.org/api/amxmodx/get_players ·
+https://raw.githubusercontent.com/alliedmodders/amxmodx/master/plugins/include/amxmodx.inc
+
+### 11.11 Redundant `== true` / `!= false` in conditions `[rule: if_equals_true]`
+Comparing a boolean expression directly against `true` or `false` inside `if`/`while`/`for`
+adds visual noise without changing semantics. Write `if (cond)` or `if (!cond)` directly.
+Stylistic rule (excluded from `recommended`). Warning.
+Sources: https://biomejs.dev/linter/rules/no-boolean-literal-for-in ·
+https://wiki.alliedmods.net/Pawn_tutorial
+
+### 11.12 Redundant boolean `if/else` return `[rule: boolean_return]`
+`if (cond) return true; else return false;` (and the inverted `false`/`true` form) can be written
+directly as `return cond;` or `return !(cond);`. Stylistic rule (excluded from `recommended`).
+Warning.
+Sources: https://biomejs.dev/linter/ ·
+https://wiki.alliedmods.net/Pawn_tutorial
+
