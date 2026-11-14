@@ -12,6 +12,8 @@ pub struct Config {
     pub rules: RulesConfig,
     #[serde(default)]
     pub output: OutputConfig,
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 #[derive(Deserialize, Clone)]
@@ -96,6 +98,37 @@ pub struct OutputConfig {
     pub color: bool,
 }
 
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    #[default]
+    Apply,
+    Notify,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UpdateConfig {
+    /// Automatically check GitHub Releases for newer versions on interactive CLI runs.
+    #[serde(default = "true_val")]
+    pub auto: bool,
+    /// Minimum hours between automatic update checks (cached on disk).
+    #[serde(default = "default_check_interval_hours")]
+    pub check_interval_hours: u64,
+    /// Action when an update is found: `"apply"` (download + verify SHA-256 + swap) or `"notify"`.
+    #[serde(default)]
+    pub mode: UpdateMode,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            check_interval_hours: default_check_interval_hours(),
+            mode: UpdateMode::Apply,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -103,6 +136,7 @@ impl Default for Config {
             exclude: default_exclude(),
             rules: RulesConfig::default(),
             output: OutputConfig { color: true },
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -153,6 +187,7 @@ fn selector_matches(sel: &str, rule_id: &str) -> bool {
 
 fn default_paths() -> Vec<String> { vec!["meus_plugins_organizados".to_string()] }
 fn default_exclude() -> Vec<String> { vec!["00-Old_Archive".to_string()] }
+fn default_check_interval_hours() -> u64 { 24 }
 fn true_val() -> bool { true }
 
 impl Config {
@@ -164,5 +199,34 @@ impl Config {
         } else {
             Ok(Self::default())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_config_defaults_to_auto_apply() {
+        let cfg = Config::default();
+        assert!(cfg.update.auto);
+        assert_eq!(cfg.update.check_interval_hours, 24);
+        assert_eq!(cfg.update.mode, UpdateMode::Apply);
+    }
+
+    #[test]
+    fn update_config_parses_overrides() {
+        let cfg: Config = toml::from_str(
+            r#"
+[update]
+auto = false
+check_interval_hours = 6
+mode = "notify"
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.update.auto);
+        assert_eq!(cfg.update.check_interval_hours, 6);
+        assert_eq!(cfg.update.mode, UpdateMode::Notify);
     }
 }
