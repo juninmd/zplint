@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
+### Features
+
+- **update,docs:** enable auto self-update, fix duplicate_global semantics, and rewrite README in English (#32)
+
 ## [0.5.0] - 2026-11-14
 
 ### Features
