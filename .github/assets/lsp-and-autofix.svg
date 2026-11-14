@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="430" viewBox="0 0 1280 430">
+  <defs>
+    <linearGradient id="bgLsp" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1120"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="430" rx="20" fill="url(#bgLsp)" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Left Card: Editor LSP Hover + Quick-Fix -->
+  <g transform="translate(36, 30)">
+    <rect width="600" height="370" rx="14" fill="#0b1220" stroke="#a855f7" stroke-opacity="0.45" stroke-width="1.4"/>
+    <rect width="600" height="40" rx="14" fill="#162033"/>
+    <rect y="26" width="600" height="14" fill="#162033"/>
+    <circle cx="24" cy="20" r="6" fill="#ef4444"/>
+    <circle cx="44" cy="20" r="6" fill="#f59e0b"/>
+    <circle cx="64" cy="20" r="6" fill="#22c55e"/>
+    <text x="300" y="25" text-anchor="middle" fill="#d8b4fe" font-family="'DejaVu Sans Mono', monospace" font-size="13" font-weight="700">zplint lsp — Hover Docs &amp; Code Actions</text>
+
+    <!-- Hover Tooltip Card -->
+    <rect x="24" y="58" width="552" height="118" rx="10" fill="#131c31" stroke="#334155" stroke-width="1.2"/>
+    <text x="42" y="84" fill="#38bdf8" font-family="'DejaVu Sans Mono', monospace" font-size="14" font-weight="700">native set_task(Float:time, const function[], id = 0, ...)</text>
+    <line x1="42" y1="96" x2="558" y2="96" stroke="#1e293b" stroke-width="1"/>
+    <text x="42" y="118" fill="#cbd5e1" font-family="'DejaVu Sans', sans-serif" font-size="14">Calls function on a timer (min 0.1s). Bundled from amxmodx.inc</text>
+    <text x="42" y="140" fill="#94a3b8" font-family="'DejaVu Sans Mono', monospace" font-size="13">Signature 1,631 natives · 3,194 AMXX constants indexed</text>
+    <rect x="42" y="149" width="142" height="18" rx="4" fill="#3b0764"/>
+    <text x="113" y="162" text-anchor="middle" fill="#e9d5ff" font-family="'DejaVu Sans Mono', monospace" font-size="11">textDocument/hover</text>
+
+    <!-- Quick Fix Code Action -->
+    <text x="26" y="210" fill="#e2e8f0" font-family="'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">12  <tspan fill="#fca5a5">set_task</tspan>(10, <tspan fill="#fde047">"tick"</tspan>)</text>
+    <line x1="58" y1="216" x2="228" y2="216" stroke="#ef4444" stroke-width="2" stroke-dasharray="4 3"/>
+
+    <rect x="58" y="232" width="518" height="116" rx="10" fill="#131c31" stroke="#3b82f6" stroke-opacity="0.6" stroke-width="1.2"/>
+    <text x="76" y="258" fill="#93c5fd" font-family="'DejaVu Sans', sans-serif" font-size="14" font-weight="700">Quick Fix (Code Action)</text>
+    <rect x="74" y="270" width="486" height="32" rx="6" fill="#1e3a8a"/>
+    <text x="90" y="291" fill="#f8fafc" font-family="'DejaVu Sans Mono', monospace" font-size="13">+ Suppress with // zplint-ignore set_task_int_interval</text>
+    <text x="76" y="328" fill="#94a3b8" font-family="'DejaVu Sans Mono', monospace" font-size="12">Supports didOpen, didChange, didSave, formatting, &amp; codeAction</text>
+  </g>
+
+  <!-- Right Card: Auto-Fix & Formatter Diff -->
+  <g transform="translate(664, 30)">
+    <rect width="580" height="370" rx="14" fill="#0b1220" stroke="#10b981" stroke-opacity="0.45" stroke-width="1.4"/>
+    <rect width="580" height="40" rx="14" fill="#162033"/>
+    <rect y="26" width="580" height="14" fill="#162033"/>
+    <circle cx="24" cy="20" r="6" fill="#ef4444"/>
+    <circle cx="44" cy="20" r="6" fill="#f59e0b"/>
+    <circle cx="64" cy="20" r="6" fill="#22c55e"/>
+    <text x="290" y="25" text-anchor="middle" fill="#6ee7b7" font-family="'DejaVu Sans Mono', monospace" font-size="13" font-weight="700">zplint fix &amp; zplint fmt — Before / After</text>
+
+    <!-- Before block -->
+    <rect x="24" y="60" width="532" height="114" rx="10" fill="#1c1118" stroke="#ef4444" stroke-opacity="0.35" stroke-width="1"/>
+    <text x="42" y="84" fill="#fca5a5" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">- BEFORE (unsafe size + unguarded ZP check)</text>
+    <text x="42" y="114" fill="#fecaca" font-family="'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">-  get_user_name(id, name, sizeof name)</text>
+    <text x="42" y="140" fill="#fecaca" font-family="'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">-  if (zp_class_zombie_get_current(id))</text>
+    <text x="42" y="162" fill="#94a3b8" font-family="'DejaVu Sans Mono', monospace" font-size="12">sizeof includes NUL cell; invalid class id can be -1</text>
+
+    <!-- After block -->
+    <rect x="24" y="192" width="532" height="114" rx="10" fill="#0d231c" stroke="#10b981" stroke-opacity="0.45" stroke-width="1"/>
+    <text x="42" y="216" fill="#6ee7b7" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="700">+ AFTER (zplint fix --unsafe-fixes)</text>
+    <text x="42" y="246" fill="#bbf7d0" font-family="'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">+  get_user_name(id, name, charsmax(name))</text>
+    <text x="42" y="272" fill="#bbf7d0" font-family="'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">+  if (zp_class_zombie_get_current(id) &gt; 0)</text>
+    <text x="42" y="294" fill="#94a3b8" font-family="'DejaVu Sans Mono', monospace" font-size="12">Safe fixes always enabled; semantic ZP fixes opt-in</text>
+
+    <!-- Footer Pill -->
+    <rect x="24" y="320" width="532" height="30" rx="8" fill="#131c31"/>
+    <text x="290" y="340" text-anchor="middle" fill="#cbd5e1" font-family="'DejaVu Sans Mono', monospace" font-size="13">$ zplint fmt --write &amp;&amp; zplint fix plugins/</text>
+  </g>
+</svg>
