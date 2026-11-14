@@ -84,6 +84,7 @@ pub fn lint(path: &Path, src: &str, config: &RulesConfig) -> Option<Vec<LintIssu
         map: &map,
         path,
         config,
+        loop_depth: 0,
         out: Vec::new(),
     };
 
@@ -182,6 +183,7 @@ pub(crate) struct Ctx<'a> {
     pub(crate) map: &'a LineMap,
     pub(crate) path: &'a Path,
     pub(crate) config: &'a RulesConfig,
+    loop_depth: usize,
     pub(crate) out: Vec<LintIssue>,
 }
 
@@ -209,6 +211,30 @@ impl Ctx<'_> {
     }
 
     fn walk_block(&mut self, block: &Block) {
+        if self.enabled("boolean_return") {
+            for pair in block.stmts.windows(2) {
+                if let [
+                    Stmt::If {
+                        cond,
+                        then_branch,
+                        else_branch: None,
+                        span,
+                    },
+                    next,
+                ] = pair
+                    && is_boolean_expr(cond)
+                    && let (Some(a), Some(b)) =
+                        (returned_bool(then_branch), returned_bool(next))
+                    && a != b
+                {
+                    self.report(
+                        span.start,
+                        "if/return boolean pattern can be simplified to 'return <cond>;'",
+                        "boolean_return",
+                    );
+                }
+            }
+        }
         for stmt in &block.stmts {
             self.walk_stmt(stmt, true);
         }
@@ -222,6 +248,19 @@ impl Ctx<'_> {
 
             Stmt::If { cond, then_branch, else_branch, span } => {
                 self.walk_expr(cond);
+                self.check_equals_true(cond);
+                if self.enabled("boolean_return")
+                    && let Some(else_stmt) = else_branch
+                    && let (Some(a), Some(b)) =
+                        (returned_bool(then_branch), returned_bool(else_stmt))
+                    && a != b
+                {
+                    self.report(
+                        span.start,
+                        "if/else returning true and false can be simplified to 'return <cond>;'",
+                        "boolean_return",
+                    );
+                }
                 // `empty_statement`: `if (x);` — the `;` *is* the body, so the
                 // block below runs unconditionally (amxxpc error 036). The regex
                 // form has to scan forward past the closing paren by hand and
@@ -244,6 +283,8 @@ impl Ctx<'_> {
 
             Stmt::While { cond, body, span } => {
                 self.walk_expr(cond);
+                self.check_equals_true(cond);
+                self.check_array_size_in_loop(cond, None, body);
                 if self.enabled("empty_statement") && matches!(**body, Stmt::Empty(_)) {
                     self.report(
                         span.start,
@@ -251,12 +292,17 @@ impl Ctx<'_> {
                         "empty_statement",
                     );
                 }
+                self.loop_depth += 1;
                 self.walk_stmt(body, false);
+                self.loop_depth -= 1;
             }
 
             Stmt::DoWhile { body, cond, .. } => {
+                self.loop_depth += 1;
                 self.walk_stmt(body, false);
+                self.loop_depth -= 1;
                 self.walk_expr(cond);
+                self.check_equals_true(cond);
             }
 
             Stmt::For { init, cond, step, body, .. } => {
@@ -267,6 +313,8 @@ impl Ctx<'_> {
                 }
                 if let Some(c) = cond {
                     self.walk_expr(c);
+                    self.check_equals_true(c);
+                    self.check_array_size_in_loop(c, step.as_ref(), body);
                 }
                 if let Some(s) = step {
                     self.walk_expr(s);
@@ -274,7 +322,9 @@ impl Ctx<'_> {
                 // A `for (...);` body is a deliberate idiom often enough that the
                 // regex rule never covered it; not flagging it here keeps the two
                 // paths in agreement.
+                self.loop_depth += 1;
                 self.walk_stmt(body, false);
+                self.loop_depth -= 1;
             }
 
             Stmt::Switch { scrutinee, cases, default, .. } => {
@@ -352,11 +402,200 @@ impl Ctx<'_> {
             );
         }
 
+        if self.loop_depth > 0
+            && self.enabled("get_players_in_loop")
+            && let ExprKind::Call { callee, span, .. } = &expr.kind
+            && let ExprKind::Ident(id) = &callee.kind
+            && matches!(id.name.as_str(), "get_players" | "get_players_ex")
+        {
+            self.report(
+                span.start,
+                "get_players() inside a loop re-scans all 32 slots on every iteration - collect the player list once before the loop",
+                "get_players_in_loop",
+            );
+        }
+
         for child in children(expr) {
             self.walk_expr(child);
         }
     }
 
+    fn check_equals_true(&mut self, expr: &Expr) {
+        if !self.enabled("if_equals_true") {
+            return;
+        }
+        match &expr.kind {
+            ExprKind::Binary { op: BinOp::LogAnd | BinOp::LogOr, lhs, rhs, .. } => {
+                self.check_equals_true(lhs);
+                self.check_equals_true(rhs);
+            }
+            ExprKind::Unary { op: zpc_ast::expr::UnOp::LogNot, operand, .. } => {
+                self.check_equals_true(operand);
+            }
+            ExprKind::Binary { op: BinOp::Eq | BinOp::Ne, lhs, rhs, span }
+                if is_bool_lit(lhs) ^ is_bool_lit(rhs) =>
+            {
+                self.report(
+                    span.start,
+                    "redundant comparison with true/false in condition - test the boolean expression directly (or negate with '!')",
+                    "if_equals_true",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn check_array_size_in_loop(&mut self, cond: &Expr, step: Option<&Expr>, body: &Stmt) {
+        if !self.enabled("array_size_in_loop") {
+            return;
+        }
+        let mut calls = Vec::new();
+        collect_array_size_calls(cond, &mut calls);
+        for (offset, arr_name) in calls {
+            let mut mutated = false;
+            if let Some(s) = step {
+                mutated |= expr_mutates_array(s, &arr_name);
+            }
+            if !mutated {
+                mutated |= stmt_mutates_array(body, &arr_name);
+            }
+            if !mutated {
+                self.report(
+                    offset,
+                    &format!(
+                        "ArraySize({}) in the loop condition is recomputed every iteration - cache it in a local variable before the loop",
+                        arr_name
+                    ),
+                    "array_size_in_loop",
+                );
+            }
+        }
+    }
+}
+
+fn is_bool_lit(expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::Ident(id) if id.name == "true" || id.name == "false")
+}
+
+fn is_boolean_expr(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Binary { op, .. } => matches!(
+            op,
+            BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::LogAnd
+                | BinOp::LogOr
+        ),
+        ExprKind::Unary { op: zpc_ast::expr::UnOp::LogNot, .. } => true,
+        _ => false,
+    }
+}
+
+fn returned_bool(stmt: &Stmt) -> Option<bool> {
+    match stmt {
+        Stmt::Block(b) if b.stmts.len() == 1 => returned_bool(&b.stmts[0]),
+        Stmt::Return { value: Some(e), .. } => match &e.kind {
+            ExprKind::Ident(id) if id.name == "true" => Some(true),
+            ExprKind::Ident(id) if id.name == "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn collect_array_size_calls(expr: &Expr, out: &mut Vec<(u32, String)>) {
+    if let ExprKind::Call { callee, args, span, .. } = &expr.kind
+        && let ExprKind::Ident(id) = &callee.kind
+        && id.name == "ArraySize"
+        && let Some(first) = args.first()
+        && let zpc_ast::expr::ArgValue::Expr(arg_expr) = &first.value
+        && let ExprKind::Ident(arr) = &arg_expr.kind
+    {
+        out.push((span.start, arr.name.clone()));
+    }
+    for child in children(expr) {
+        collect_array_size_calls(child, out);
+    }
+}
+
+fn is_array_mutating_native(name: &str) -> bool {
+    matches!(
+        name,
+        "ArrayPushCell"
+            | "ArrayPushArray"
+            | "ArrayPushString"
+            | "ArrayInsertCellAfter"
+            | "ArrayInsertCellBefore"
+            | "ArrayInsertArrayAfter"
+            | "ArrayInsertArrayBefore"
+            | "ArrayInsertStringAfter"
+            | "ArrayInsertStringBefore"
+            | "ArrayDeleteItem"
+            | "ArrayClear"
+            | "ArrayResize"
+            | "ArrayDestroy"
+    )
+}
+
+fn expr_mutates_array(expr: &Expr, arr_name: &str) -> bool {
+    if let ExprKind::Call { callee, args, .. } = &expr.kind
+        && let ExprKind::Ident(id) = &callee.kind
+        && is_array_mutating_native(&id.name)
+        && let Some(first) = args.first()
+        && let zpc_ast::expr::ArgValue::Expr(arg_expr) = &first.value
+        && let ExprKind::Ident(target) = &arg_expr.kind
+        && target.name == arr_name
+    {
+        return true;
+    }
+    children(expr).into_iter().any(|c| expr_mutates_array(c, arr_name))
+}
+
+fn stmt_mutates_array(stmt: &Stmt, arr_name: &str) -> bool {
+    match stmt {
+        Stmt::Block(b) => b.stmts.iter().any(|s| stmt_mutates_array(s, arr_name)),
+        Stmt::If { cond, then_branch, else_branch, .. } => {
+            expr_mutates_array(cond, arr_name)
+                || stmt_mutates_array(then_branch, arr_name)
+                || else_branch.as_deref().is_some_and(|e| stmt_mutates_array(e, arr_name))
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            expr_mutates_array(cond, arr_name) || stmt_mutates_array(body, arr_name)
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            let init_mut = match init {
+                Some(ForInit::Expr(e)) => expr_mutates_array(e, arr_name),
+                Some(ForInit::Decl(v)) => v.declarators.iter().any(|d| {
+                    matches!(&d.init, Some(zpc_ast::decl::Init::Expr(e)) if expr_mutates_array(e, arr_name))
+                }),
+                None => false,
+            };
+            init_mut
+                || cond.as_ref().is_some_and(|c| expr_mutates_array(c, arr_name))
+                || step.as_ref().is_some_and(|s| expr_mutates_array(s, arr_name))
+                || stmt_mutates_array(body, arr_name)
+        }
+        Stmt::Switch { scrutinee, cases, default, .. } => {
+            expr_mutates_array(scrutinee, arr_name)
+                || cases.iter().any(|c| stmt_mutates_array(&c.body, arr_name))
+                || default.as_deref().is_some_and(|d| stmt_mutates_array(d, arr_name))
+        }
+        Stmt::Expr { expr, .. }
+        | Stmt::Return { value: Some(expr), .. }
+        | Stmt::Exit { value: Some(expr), .. }
+        | Stmt::Sleep { value: Some(expr), .. }
+        | Stmt::State { cond: Some(expr), .. } => expr_mutates_array(expr, arr_name),
+        Stmt::Var(v) => v.declarators.iter().any(|d| {
+            matches!(&d.init, Some(zpc_ast::decl::Init::Expr(e)) if expr_mutates_array(e, arr_name))
+        }),
+        Stmt::Const(c) => expr_mutates_array(&c.value, arr_name),
+        Stmt::Assert { exprs, .. } => exprs.iter().any(|e| expr_mutates_array(e, arr_name)),
+        _ => false,
+    }
 }
 
 /// Direct sub-expressions, in source order.
@@ -587,5 +826,87 @@ public cmd(id, name[]) {
         let div = compare(&p, &RulesConfig::default());
         assert!(div.is_empty(), "paths disagree: {:?}", div.iter().map(|d| (&d.rule_id, d.lineno, d.ast_only)).collect::<Vec<_>>());
         std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn array_size_in_loop_flagged_unless_hoisted_or_mutated() {
+        let bad = write(
+            "arrloopbad",
+            "public f(Array:arr) {\n    for (new i = 0; i < ArraySize(arr); i++) {\n        log_amx(\"%d\", i);\n    }\n}\n",
+        );
+        assert!(rules_at(&bad).contains(&"array_size_in_loop"));
+        std::fs::remove_file(bad).unwrap();
+
+        let ok_hoist = write(
+            "arrloopok1",
+            "public f(Array:arr) {\n    for (new i = 0, n = ArraySize(arr); i < n; i++) {\n        log_amx(\"%d\", i);\n    }\n}\n",
+        );
+        assert!(!rules_at(&ok_hoist).contains(&"array_size_in_loop"));
+        std::fs::remove_file(ok_hoist).unwrap();
+
+        let ok_mut = write(
+            "arrloopok2",
+            "public f(Array:arr) {\n    while (ArraySize(arr) > 0) {\n        ArrayDeleteItem(arr, 0);\n    }\n}\n",
+        );
+        assert!(!rules_at(&ok_mut).contains(&"array_size_in_loop"));
+        std::fs::remove_file(ok_mut).unwrap();
+    }
+
+    #[test]
+    fn get_players_in_loop_flagged_only_inside_loops() {
+        let bad = write(
+            "gploopbad",
+            "public f() {\n    new players[32], num;\n    for (new r = 0; r < 3; r++) {\n        get_players(players, num);\n    }\n}\n",
+        );
+        assert!(rules_at(&bad).contains(&"get_players_in_loop"));
+        std::fs::remove_file(bad).unwrap();
+
+        let ok = write(
+            "gploopok",
+            "public f() {\n    new players[32], num;\n    get_players(players, num);\n    for (new i = 0; i < num; i++) {\n        log_amx(\"%d\", players[i]);\n    }\n}\n",
+        );
+        assert!(!rules_at(&ok).contains(&"get_players_in_loop"));
+        std::fs::remove_file(ok).unwrap();
+    }
+
+    #[test]
+    fn if_equals_true_flagged_only_on_bool_literals() {
+        let bad = write(
+            "eqtruebad",
+            "public f(bool:ok) {\n    if (ok == true) {\n        return 1;\n    }\n    return 0;\n}\n",
+        );
+        assert!(rules_at(&bad).contains(&"if_equals_true"));
+        std::fs::remove_file(bad).unwrap();
+
+        let ok = write(
+            "eqtrueok",
+            "public f(bool:ok) {\n    if (ok) {\n        return 1;\n    }\n    return 0;\n}\n",
+        );
+        assert!(!rules_at(&ok).contains(&"if_equals_true"));
+        std::fs::remove_file(ok).unwrap();
+    }
+
+    #[test]
+    fn boolean_return_flagged_on_if_else_and_sequential_returns() {
+        let bad_else = write(
+            "boolret1",
+            "bool:is_pos(x) {\n    if (x > 0) {\n        return true;\n    } else {\n        return false;\n    }\n}\n",
+        );
+        assert!(rules_at(&bad_else).contains(&"boolean_return"));
+        std::fs::remove_file(bad_else).unwrap();
+
+        let bad_seq = write(
+            "boolret2",
+            "bool:is_pos(x) {\n    if (x > 0)\n        return true;\n    return false;\n}\n",
+        );
+        assert!(rules_at(&bad_seq).contains(&"boolean_return"));
+        std::fs::remove_file(bad_seq).unwrap();
+
+        let ok = write(
+            "boolretok",
+            "bool:is_pos(x) {\n    return x > 0;\n}\n",
+        );
+        assert!(!rules_at(&ok).contains(&"boolean_return"));
+        std::fs::remove_file(ok).unwrap();
     }
 }

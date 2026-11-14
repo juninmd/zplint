@@ -100,6 +100,7 @@ pub fn lint_source(filepath: &std::path::Path, raw: &str, config: &RulesConfig) 
         config
     };
 
+    crate::detectors::detect_nested_comments(raw, config, &mut ast_issues);
     let raw_clean = strip_block_comments(raw);
     let lines_clean: Vec<&str> = raw_clean.split('\n').collect();
     // Registration callbacks live in quoted strings: strip `//` comments but
@@ -790,6 +791,14 @@ static WARNING_RULES: &[&str] = &[
     "get_players_flags",
     "find_player_flags",
     "read_data_bounds",
+    "in_file_arity",
+    "nested_comment",
+    "cvar_pointer_null",
+    "path_traversal",
+    "array_size_in_loop",
+    "get_players_in_loop",
+    "if_equals_true",
+    "boolean_return",
 ];
 
 /// True when `rule_id` is deliberately a warning (style/perf/contract smell)

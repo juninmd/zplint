@@ -30,17 +30,28 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
         && !cx.enabled("write_only_symbol")
         && !cx.enabled("use_before_init")
         && !cx.enabled("unintended_bitwise")
+        && !cx.enabled("duplicate_global")
+        && !cx.enabled("sizeof_function")
+        && !cx.enabled("mixed_array_return")
+        && !cx.enabled("in_file_arity")
     {
         return;
     }
 
     let mut table = SymbolTable::new(cx.path);
+    let mut local_sigs: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut global_dims: HashMap<String, usize> = HashMap::new();
 
     // Pass 1: declare every file-scope name first, so a function can refer to a
     // global/function declared below it (Pawn allows that).
     for item in &program.items {
         match item {
-            Item::Var(v) => declare_var(&mut table, v, false),
+            Item::Var(v) => {
+                declare_var(&mut table, v, false);
+                for d in &v.declarators {
+                    global_dims.insert(d.name.name.clone(), d.dims.len());
+                }
+            }
             Item::Const(c) => {
                 // Constants are intentionally READ-exempt: flag enums and
                 // compile-time tables are routinely "unused" by design.
@@ -87,10 +98,31 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
                     SymbolDecl::new(name.name.clone(), SymKind::Function, name.span)
                         .with_usage(usage),
                 );
+
+                if crate::api::lookup(&name.name).is_none() {
+                    let min_args = f
+                        .params
+                        .iter()
+                        .filter(|p| matches!(p, Param::Fixed(fp) if fp.default.is_none()))
+                        .count();
+                    let max_args = if f.params.iter().any(|p| matches!(p, Param::Rest(_))) {
+                        usize::MAX
+                    } else {
+                        f.params.len()
+                    };
+                    if f.body.is_some() || !local_sigs.contains_key(&name.name) {
+                        local_sigs.insert(name.name.clone(), (min_args, max_args));
+                    }
+                }
             }
             _ => {}
         }
     }
+
+    let sema_ctx = SemaCtx {
+        local_sigs: &local_sigs,
+        global_dims: &global_dims,
+    };
 
     // Pass 2: bodies and global initialisers.
     for item in &program.items {
@@ -101,11 +133,11 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
                     tr.enter();
                     for dim in &d.dims {
                         if let Some(e) = &dim.size {
-                            walk_expr(cx, &mut table, &mut tr, e);
+                            walk_expr(cx, &sema_ctx, &mut table, &mut tr, e);
                         }
                     }
                     if let Some(Init::Expr(e)) = &d.init {
-                        walk_expr(cx, &mut table, &mut tr, e);
+                        walk_expr(cx, &sema_ctx, &mut table, &mut tr, e);
                     }
                     tr.leave();
                 }
@@ -113,12 +145,13 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
             Item::Const(c) => {
                 let mut tr = Tracker::default();
                 tr.enter();
-                walk_expr(cx, &mut table, &mut tr, &c.value);
+                walk_expr(cx, &sema_ctx, &mut table, &mut tr, &c.value);
                 tr.leave();
             }
             Item::Func(f) => {
                 if let Some(body) = &f.body {
                     let mut tr = Tracker::default();
+                    let mut ret = ReturnTracker::default();
                     table.enter_scope();
                     tr.enter();
                     for p in &f.params {
@@ -137,10 +170,19 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
                                 SymbolDecl::new(p.name.name.clone(), kind, p.name.span)
                                     .with_usage(Usage::DEFINED | Usage::READ),
                             );
-                            tr.declare(&p.name.name, p.name.span, true);
+                            tr.declare(&p.name.name, p.name.span, true, p.dims.len());
                         }
                     }
-                    walk_block(cx, &mut table, &mut tr, body);
+                    walk_block(cx, &sema_ctx, &mut table, &mut tr, &mut ret, body);
+                    if cx.enabled("mixed_array_return")
+                        && let (Some(arr_off), Some(scalar_off)) = (ret.array_ret, ret.scalar_ret)
+                    {
+                        cx.report(
+                            arr_off.max(scalar_off),
+                            "function mixes array/string and scalar return values (error 079: inconsistent return types)",
+                            "mixed_array_return",
+                        );
+                    }
                     tr.leave();
                     table.leave_scope();
                 }
@@ -152,6 +194,13 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
     let diagnostics = table.finish();
     for d in diagnostics {
         match d.code {
+            21 if cx.enabled("duplicate_global") => {
+                cx.report(
+                    d.span.start,
+                    &format!("{} (error 021)", d.message),
+                    "duplicate_global",
+                );
+            }
             203 if cx.enabled("unused_symbol") => {
                 cx.report(
                     d.span.start,
@@ -169,6 +218,17 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
             _ => {}
         }
     }
+}
+
+struct SemaCtx<'a> {
+    local_sigs: &'a HashMap<String, (usize, usize)>,
+    global_dims: &'a HashMap<String, usize>,
+}
+
+#[derive(Default)]
+struct ReturnTracker {
+    array_ret: Option<u32>,
+    scalar_ret: Option<u32>,
 }
 
 fn declare_var(table: &mut SymbolTable, v: &VarDecl, local: bool) {
@@ -198,45 +258,60 @@ fn declare_var(table: &mut SymbolTable, v: &VarDecl, local: bool) {
     }
 }
 
-fn walk_block(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, block: &Block) {
+fn walk_block(
+    cx: &mut Ctx,
+    sema: &SemaCtx,
+    table: &mut SymbolTable,
+    tr: &mut Tracker,
+    ret: &mut ReturnTracker,
+    block: &Block,
+) {
     table.enter_scope();
     tr.enter();
     for s in &block.stmts {
-        walk_stmt(cx, table, tr, s);
+        walk_stmt(cx, sema, table, tr, ret, s);
     }
     tr.leave();
     table.leave_scope();
 }
 
-fn walk_stmt(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, stmt: &Stmt) {
+fn walk_stmt(
+    cx: &mut Ctx,
+    sema: &SemaCtx,
+    table: &mut SymbolTable,
+    tr: &mut Tracker,
+    ret: &mut ReturnTracker,
+    stmt: &Stmt,
+) {
     match stmt {
-        Stmt::Block(b) => walk_block(cx, table, tr, b),
+        Stmt::Block(b) => walk_block(cx, sema, table, tr, ret, b),
         Stmt::Var(v) => {
             declare_var(table, v, true);
             for d in &v.declarators {
                 for dim in &d.dims {
                     if let Some(e) = &dim.size {
-                        walk_expr(cx, table, tr, e);
+                        walk_expr(cx, sema, table, tr, e);
                     }
                 }
                 let zeroed = !d.dims.is_empty() || v.modifiers.static_;
+                let dims = d.dims.len();
                 match &d.init {
                     Some(Init::Expr(e)) => {
-                        tr.declare(&d.name.name, d.name.span, false);
-                        walk_expr(cx, table, tr, e);
+                        tr.declare(&d.name.name, d.name.span, false, dims);
+                        walk_expr(cx, sema, table, tr, e);
                         tr.write(&d.name.name);
                     }
                     Some(Init::List(_)) => {
-                        tr.declare(&d.name.name, d.name.span, true);
+                        tr.declare(&d.name.name, d.name.span, true, dims);
                     }
                     None => {
-                        tr.declare(&d.name.name, d.name.span, zeroed);
+                        tr.declare(&d.name.name, d.name.span, zeroed, dims);
                     }
                 }
             }
         }
         Stmt::Const(_) | Stmt::Enum(_) => {}
-        Stmt::Expr { expr, .. } => walk_expr(cx, table, tr, expr),
+        Stmt::Expr { expr, .. } => walk_expr(cx, sema, table, tr, expr),
         Stmt::If {
             cond,
             then_branch,
@@ -244,21 +319,21 @@ fn walk_stmt(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, stmt: &Stm
             ..
         } => {
             check_bitwise(cx, cond);
-            walk_expr(cx, table, tr, cond);
-            walk_stmt(cx, table, tr, then_branch);
+            walk_expr(cx, sema, table, tr, cond);
+            walk_stmt(cx, sema, table, tr, ret, then_branch);
             if let Some(e) = else_branch {
-                walk_stmt(cx, table, tr, e);
+                walk_stmt(cx, sema, table, tr, ret, e);
             }
         }
         Stmt::While { cond, body, .. } => {
             check_bitwise(cx, cond);
-            walk_expr(cx, table, tr, cond);
-            walk_stmt(cx, table, tr, body);
+            walk_expr(cx, sema, table, tr, cond);
+            walk_stmt(cx, sema, table, tr, ret, body);
         }
         Stmt::DoWhile { body, cond, .. } => {
-            walk_stmt(cx, table, tr, body);
+            walk_stmt(cx, sema, table, tr, ret, body);
             check_bitwise(cx, cond);
-            walk_expr(cx, table, tr, cond);
+            walk_expr(cx, sema, table, tr, cond);
         }
         Stmt::For {
             init,
@@ -275,36 +350,37 @@ fn walk_stmt(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, stmt: &Stm
                     for d in &v.declarators {
                         for dim in &d.dims {
                             if let Some(e) = &dim.size {
-                                walk_expr(cx, table, tr, e);
+                                walk_expr(cx, sema, table, tr, e);
                             }
                         }
                         let zeroed = !d.dims.is_empty() || v.modifiers.static_;
+                        let dims = d.dims.len();
                         match &d.init {
                             Some(Init::Expr(e)) => {
-                                tr.declare(&d.name.name, d.name.span, false);
-                                walk_expr(cx, table, tr, e);
+                                tr.declare(&d.name.name, d.name.span, false, dims);
+                                walk_expr(cx, sema, table, tr, e);
                                 tr.write(&d.name.name);
                             }
                             Some(Init::List(_)) => {
-                                tr.declare(&d.name.name, d.name.span, true);
+                                tr.declare(&d.name.name, d.name.span, true, dims);
                             }
                             None => {
-                                tr.declare(&d.name.name, d.name.span, zeroed);
+                                tr.declare(&d.name.name, d.name.span, zeroed, dims);
                             }
                         }
                     }
                 }
-                Some(ForInit::Expr(e)) => walk_expr(cx, table, tr, e),
+                Some(ForInit::Expr(e)) => walk_expr(cx, sema, table, tr, e),
                 None => {}
             }
             if let Some(c) = cond {
                 check_bitwise(cx, c);
-                walk_expr(cx, table, tr, c);
+                walk_expr(cx, sema, table, tr, c);
             }
             if let Some(s) = step {
-                walk_expr(cx, table, tr, s);
+                walk_expr(cx, sema, table, tr, s);
             }
-            walk_stmt(cx, table, tr, body);
+            walk_stmt(cx, sema, table, tr, ret, body);
             tr.leave();
             table.leave_scope();
         }
@@ -314,32 +390,49 @@ fn walk_stmt(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, stmt: &Stm
             default,
             ..
         } => {
-            walk_expr(cx, table, tr, scrutinee);
+            walk_expr(cx, sema, table, tr, scrutinee);
             for c in cases {
                 for label in &c.labels {
                     match label {
-                        zpc_ast::stmt::CaseLabel::Single(e) => walk_expr(cx, table, tr, e),
+                        zpc_ast::stmt::CaseLabel::Single(e) => {
+                            walk_expr(cx, sema, table, tr, e)
+                        }
                         zpc_ast::stmt::CaseLabel::Range { lo, hi, .. } => {
-                            walk_expr(cx, table, tr, lo);
-                            walk_expr(cx, table, tr, hi);
+                            walk_expr(cx, sema, table, tr, lo);
+                            walk_expr(cx, sema, table, tr, hi);
                         }
                     }
                 }
-                walk_stmt(cx, table, tr, &c.body);
+                walk_stmt(cx, sema, table, tr, ret, &c.body);
             }
             if let Some(d) = default {
-                walk_stmt(cx, table, tr, d);
+                walk_stmt(cx, sema, table, tr, ret, d);
             }
         }
-        Stmt::Return { value: Some(e), .. }
-        | Stmt::Exit { value: Some(e), .. }
-        | Stmt::Sleep { value: Some(e), .. } => walk_expr(cx, table, tr, e),
+        Stmt::Return {
+            value: Some(e),
+            span,
+        } => {
+            match expr_is_array(e, tr, sema.global_dims, table) {
+                Some(true) => {
+                    ret.array_ret.get_or_insert(span.start);
+                }
+                Some(false) => {
+                    ret.scalar_ret.get_or_insert(span.start);
+                }
+                None => {}
+            }
+            walk_expr(cx, sema, table, tr, e);
+        }
+        Stmt::Exit { value: Some(e), .. } | Stmt::Sleep { value: Some(e), .. } => {
+            walk_expr(cx, sema, table, tr, e)
+        }
         Stmt::Assert { exprs, .. } => {
             for e in exprs {
-                walk_expr(cx, table, tr, e);
+                walk_expr(cx, sema, table, tr, e);
             }
         }
-        Stmt::State { cond: Some(c), .. } => walk_expr(cx, table, tr, c),
+        Stmt::State { cond: Some(c), .. } => walk_expr(cx, sema, table, tr, c),
         Stmt::Goto { label, .. } => {
             table.reference(&label.name, label.span, RefKind::Read);
         }
@@ -359,7 +452,82 @@ fn walk_stmt(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, stmt: &Stm
     }
 }
 
-fn walk_expr(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, expr: &Expr) {
+fn expr_is_array(
+    expr: &Expr,
+    tr: &Tracker,
+    global_dims: &HashMap<String, usize>,
+    table: &SymbolTable,
+) -> Option<bool> {
+    match &expr.kind {
+        ExprKind::Str(_) | ExprKind::LitArray { .. } => Some(true),
+        ExprKind::Num(_)
+        | ExprKind::Rational(_)
+        | ExprKind::Char { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::IncDec { .. }
+        | ExprKind::SizeOf { .. }
+        | ExprKind::TagOf { .. }
+        | ExprKind::Defined { .. }
+        | ExprKind::CharCells { .. } => Some(false),
+        ExprKind::Ident(id) => {
+            if id.name == "true" || id.name == "false" {
+                return Some(false);
+            }
+            if let Some(dims) = tr.dims(&id.name).or_else(|| global_dims.get(&id.name).copied()) {
+                return Some(dims > 0);
+            }
+            if let Some(sym) = table.lookup(&id.name)
+                && table.get(sym).kind == SymKind::Constant
+            {
+                return Some(false);
+            }
+            None
+        }
+        ExprKind::Index { .. } => {
+            let mut cur = expr;
+            let mut depth = 0usize;
+            while let ExprKind::Index { base, .. } = &cur.kind {
+                depth += 1;
+                cur = base;
+            }
+            if let ExprKind::Ident(id) = &cur.kind
+                && let Some(dims) = tr.dims(&id.name).or_else(|| global_dims.get(&id.name).copied())
+            {
+                if dims > depth {
+                    return Some(true);
+                }
+                if dims == depth {
+                    return Some(false);
+                }
+            }
+            None
+        }
+        ExprKind::Cast { expr, .. } => expr_is_array(expr, tr, global_dims, table),
+        ExprKind::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            match (
+                expr_is_array(then_expr, tr, global_dims, table),
+                expr_is_array(else_expr, tr, global_dims, table),
+            ) {
+                (Some(a), Some(b)) if a == b => Some(a),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn walk_expr(
+    cx: &mut Ctx,
+    sema: &SemaCtx,
+    table: &mut SymbolTable,
+    tr: &mut Tracker,
+    expr: &Expr,
+) {
     match &expr.kind {
         ExprKind::Ident(id) => {
             table.reference(&id.name, id.span, RefKind::Read);
@@ -369,10 +537,10 @@ fn walk_expr(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, expr: &Exp
         }
         ExprKind::Comma { exprs, .. } => {
             for e in exprs {
-                walk_expr(cx, table, tr, e);
+                walk_expr(cx, sema, table, tr, e);
             }
         }
-        ExprKind::Unary { operand, .. } => walk_expr(cx, table, tr, operand),
+        ExprKind::Unary { operand, .. } => walk_expr(cx, sema, table, tr, operand),
         ExprKind::IncDec { operand, .. } => {
             if let ExprKind::Ident(id) = &operand.kind {
                 table.reference(&id.name, id.span, RefKind::ReadWrite);
@@ -381,17 +549,17 @@ fn walk_expr(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, expr: &Exp
                 }
                 tr.write(&id.name);
             } else {
-                walk_expr(cx, table, tr, operand);
+                walk_expr(cx, sema, table, tr, operand);
             }
         }
         ExprKind::Binary { lhs, rhs, .. } => {
-            walk_expr(cx, table, tr, lhs);
-            walk_expr(cx, table, tr, rhs);
+            walk_expr(cx, sema, table, tr, lhs);
+            walk_expr(cx, sema, table, tr, rhs);
         }
         ExprKind::Assign {
             op, target, value, ..
         } => {
-            walk_expr(cx, table, tr, value);
+            walk_expr(cx, sema, table, tr, value);
             if let ExprKind::Ident(id) = &target.kind {
                 let kind = if op.is_some() {
                     RefKind::ReadWrite
@@ -406,7 +574,7 @@ fn walk_expr(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, expr: &Exp
                 }
                 tr.write(&id.name);
             } else {
-                walk_expr(cx, table, tr, target);
+                walk_expr(cx, sema, table, tr, target);
             }
         }
         ExprKind::Ternary {
@@ -415,20 +583,51 @@ fn walk_expr(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, expr: &Exp
             else_expr,
             ..
         } => {
-            walk_expr(cx, table, tr, cond);
-            walk_expr(cx, table, tr, then_expr);
-            walk_expr(cx, table, tr, else_expr);
+            walk_expr(cx, sema, table, tr, cond);
+            walk_expr(cx, sema, table, tr, then_expr);
+            walk_expr(cx, sema, table, tr, else_expr);
         }
         ExprKind::Index { base, index, .. } => {
-            walk_expr(cx, table, tr, base);
-            walk_expr(cx, table, tr, index);
+            walk_expr(cx, sema, table, tr, base);
+            walk_expr(cx, sema, table, tr, index);
         }
-        ExprKind::Call { callee, args, .. } => {
+        ExprKind::Call {
+            callee, args, span, ..
+        } => {
             let api = if let ExprKind::Ident(id) = &callee.kind {
                 table.reference(&id.name, id.span, RefKind::Call);
+                if cx.enabled("in_file_arity")
+                    && tr.dims(&id.name).is_none()
+                    && let Some(&(min, max)) = sema.local_sigs.get(&id.name)
+                {
+                    let has_named = args.iter().any(|a| a.name.is_some());
+                    if args.len() > max {
+                        cx.report(
+                            span.start,
+                            &format!(
+                                "function '{}' takes at most {} argument(s), {} given (error 092)",
+                                id.name,
+                                max,
+                                args.len()
+                            ),
+                            "in_file_arity",
+                        );
+                    } else if !has_named && args.len() < min {
+                        cx.report(
+                            span.start,
+                            &format!(
+                                "function '{}' requires at least {} argument(s), {} given (warning 202)",
+                                id.name,
+                                min,
+                                args.len()
+                            ),
+                            "in_file_arity",
+                        );
+                    }
+                }
                 crate::api::lookup(&id.name)
             } else {
-                walk_expr(cx, table, tr, callee);
+                walk_expr(cx, sema, table, tr, callee);
                 None
             };
             for (i, a) in args.iter().enumerate() {
@@ -444,15 +643,31 @@ fn walk_expr(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, expr: &Exp
                     {
                         tr.write(&id.name);
                     }
-                    walk_expr(cx, table, tr, e);
+                    walk_expr(cx, sema, table, tr, e);
                 }
             }
         }
         ExprKind::Cast { expr, .. } | ExprKind::CharCells { operand: expr, .. } => {
-            walk_expr(cx, table, tr, expr);
+            walk_expr(cx, sema, table, tr, expr);
         }
         ExprKind::SizeOf { symbol, .. } => {
             table.reference(&symbol.name, symbol.span, RefKind::Read);
+            if cx.enabled("sizeof_function") {
+                let is_func = match table.lookup(&symbol.name) {
+                    Some(id) => table.get(id).kind.is_function(),
+                    None => crate::api::lookup(&symbol.name).is_some(),
+                };
+                if is_func {
+                    cx.report(
+                        symbol.span.start,
+                        &format!(
+                            "sizeof cannot be applied to function '{}' (error 072: \"sizeof\" operator is invalid on \"function\" symbols)",
+                            symbol.name
+                        ),
+                        "sizeof_function",
+                    );
+                }
+            }
         }
         ExprKind::TagOf {
             target: zpc_ast::expr::TagOfTarget::Symbol(id),
@@ -462,7 +677,7 @@ fn walk_expr(cx: &mut Ctx, table: &mut SymbolTable, tr: &mut Tracker, expr: &Exp
         }
         ExprKind::LitArray { elems, .. } => {
             for e in elems {
-                walk_expr(cx, table, tr, e);
+                walk_expr(cx, sema, table, tr, e);
             }
         }
         _ => {}
@@ -585,6 +800,78 @@ mod tests {
         let ok = lint("bitok", "public f(flags) {\n\tif (flags & 1) return\n}\n");
         assert!(!has(&ok, "unintended_bitwise"));
     }
+
+    #[test]
+    fn duplicate_global_is_flagged_but_forward_pair_passes() {
+        let bad = lint("dupbad", "new g_x;\nnew g_x;\npublic f() { g_x = 1; }\n");
+        assert!(has(&bad, "duplicate_global"));
+
+        let bad_fn = lint("dupfn", "helper() { return 1; }\nhelper() { return 2; }\n");
+        assert!(has(&bad_fn, "duplicate_global"));
+
+        let ok = lint("dupok", "forward my_fwd(id);\npublic my_fwd(id) { return id; }\n");
+        assert!(!has(&ok, "duplicate_global"));
+    }
+
+    #[test]
+    fn sizeof_function_is_flagged_but_array_passes() {
+        let bad = lint("szfnbad", "helper() { return 1; }\npublic f() {\n\treturn sizeof helper;\n}\n");
+        assert!(has(&bad, "sizeof_function"));
+
+        let bad_nat = lint("szfnnat", "public f() {\n\treturn sizeof get_user_name;\n}\n");
+        assert!(has(&bad_nat, "sizeof_function"));
+
+        let ok = lint("szfnok", "public f() {\n\tnew arr[8];\n\treturn sizeof arr;\n}\n");
+        assert!(!has(&ok, "sizeof_function"));
+    }
+
+    #[test]
+    fn mixed_array_return_is_flagged() {
+        let bad = lint(
+            "mixarrbad",
+            "stock f(cond) {\n\tnew arr[4];\n\tif (cond) return arr;\n\treturn 0;\n}\n",
+        );
+        assert!(has(&bad, "mixed_array_return"));
+
+        let ok_elem = lint(
+            "mixarrok1",
+            "stock f(cond) {\n\tnew arr[4];\n\tif (cond) return arr[0];\n\treturn 0;\n}\n",
+        );
+        assert!(!has(&ok_elem, "mixed_array_return"));
+
+        let ok_both = lint(
+            "mixarrok2",
+            "stock f(cond, a[4], b[4]) {\n\tif (cond) return a;\n\treturn b;\n}\n",
+        );
+        assert!(!has(&ok_both, "mixed_array_return"));
+    }
+
+    #[test]
+    fn in_file_arity_checks_local_functions() {
+        let bad_few = lint(
+            "arityfew",
+            "helper(a, b) { return a + b; }\npublic f() { return helper(1); }\n",
+        );
+        assert!(has(&bad_few, "in_file_arity"));
+
+        let bad_many = lint(
+            "aritymany",
+            "helper(a) { return a; }\npublic f() { return helper(1, 2); }\n",
+        );
+        assert!(has(&bad_many, "in_file_arity"));
+
+        let ok_def = lint(
+            "aritydef",
+            "helper(a, b = 10) { return a + b; }\npublic f() { return helper(1) + helper(1, 2); }\n",
+        );
+        assert!(!has(&ok_def, "in_file_arity"));
+
+        let ok_var = lint(
+            "arityvar",
+            "helper(a, ...) { return a; }\npublic f() { return helper(1, 2, 3, 4); }\n",
+        );
+        assert!(!has(&ok_var, "in_file_arity"));
+    }
 }
 
 #[derive(Default)]
@@ -598,6 +885,7 @@ struct LocalState {
     declared: Span,
     initialized: bool,
     reported: bool,
+    dims: usize,
 }
 
 impl Tracker {
@@ -618,7 +906,7 @@ impl Tracker {
         }
     }
 
-    fn declare(&mut self, name: &str, span: Span, initialized: bool) {
+    fn declare(&mut self, name: &str, span: Span, initialized: bool, dims: usize) {
         self.locals
             .entry(name.to_string())
             .or_default()
@@ -626,10 +914,15 @@ impl Tracker {
                 declared: span,
                 initialized,
                 reported: false,
+                dims,
             });
         if let Some(scope) = self.scopes.last_mut() {
             scope.push(name.to_string());
         }
+    }
+
+    fn dims(&self, name: &str) -> Option<usize> {
+        self.locals.get(name)?.last().map(|s| s.dims)
     }
 
     fn write(&mut self, name: &str) {

@@ -4,7 +4,7 @@
 
 # zplint
 
-**Linter para plugins Pawn / AMX Mod X: 153 regras, um binário, nada para instalar em runtime.**<br/>
+**Linter para plugins Pawn / AMX Mod X: 165 regras, um binário, nada para instalar em runtime.**<br/>
 Pega erro de compilação e padrão que derruba o servidor antes de o plugin subir.
 
 [![CI](https://github.com/juninmd/zplint/actions/workflows/ci.yml/badge.svg)](https://github.com/juninmd/zplint/actions/workflows/ci.yml)
@@ -48,7 +48,7 @@ binário sem dependências de runtime.
 
 Cada item abaixo corresponde a um subcomando real (`zplint --help`).
 
-- **Linter** (`lint`, `ci`): 153 regras listadas por `zplint rules`, cada uma com fonte documentada em
+- **Linter** (`lint`, `ci`): 165 regras listadas por `zplint rules`, cada uma com fonte documentada em
   [`docs/KNOWLEDGE.md`](docs/KNOWLEDGE.md) (fontes do compilador AMXX, wiki/fóruns AlliedModders,
   documentação amxmodx.org, fontes oficiais do ZP 5.0).
 - **Seleção de regras**: `--only` e `--skip` aceitam id, categoria (`correctness`, `suspicious`,
@@ -305,7 +305,7 @@ do `amxxpc`; a adoção em produção deve começar como canário e manter o gat
 
 ## Regras
 
-`zplint rules` lista as 153 regras com categoria, severidade e descrição. As tabelas abaixo são o catálogo
+`zplint rules` lista as 165 regras com categoria, severidade e descrição. As tabelas abaixo são o catálogo
 curado: **este arquivo é embutido no binário em tempo de compilação** (`include_str!` em `src/rule_meta.rs` e
 `src/main.rs`) e alimenta `zplint rules` e `zplint explain`. Por isso as linhas de tabela que começam com
 `` | `id` `` e as descrições, que são dados do catálogo, ficam em inglês e não podem mudar de formato.
@@ -495,6 +495,22 @@ desligue qualquer um por id em `disable`, na tabela `[rules]` (veja [Configuraç
 | `unknown_pragma` | warning | `#pragma` outside amxxpc's vocabulary (warning 207, silently ignored) |
 | `sizeof_scalar` | warning | `sizeof` on a scalar is always 1 (warning 223) |
 
+### Paridade com o compilador, contratos, performance, segurança e estilo (12)
+
+| Regra | Severidade | Descrição |
+|------|----------|-------------|
+| `duplicate_global` | error | Duplicate declaration in the same scope (error 021) |
+| `sizeof_function` | error | `sizeof` applied to a function or native symbol (error 072) |
+| `mixed_array_return` | error | Function mixes array/string and scalar return values (error 079) |
+| `in_file_arity` | warning | Call to an in-file function with wrong argument count (warning 202 / error 092) |
+| `nested_comment` | warning | Nested `/*` inside an open block comment (warning 216) |
+| `sql_thread_signature` | error | `SQL_ThreadQuery` handler declares more than 7 parameters |
+| `cvar_pointer_null` | warning | Local `get_cvar_pointer()` handle used without checking for 0 |
+| `path_traversal` | warning | File operation receives user-controlled path without checking `..`/separators |
+| `array_size_in_loop` | warning | `ArraySize()` recomputed every iteration in a non-mutating loop condition |
+| `get_players_in_loop` | warning | `get_players()`/`get_players_ex()` called inside a loop |
+| `if_equals_true` | warning | Redundant `== true` / `!= false` comparison in condition |
+| `boolean_return` | warning | `if (cond) return true; else return false;` can be simplified to `return cond` |
 
 Duas regras existentes foram ampliadas no mesmo lote:
 
