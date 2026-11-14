@@ -31,6 +31,10 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// Disable automatic self-update check for this run
+    #[arg(long, global = true)]
+    no_auto_update: bool,
+
     /// Specific .sma files to lint
     files: Vec<PathBuf>,
 }
@@ -159,10 +163,35 @@ enum Command {
     },
 }
 
+fn should_auto_update(cli: &Cli) -> bool {
+    if cli.no_auto_update {
+        return false;
+    }
+    match &cli.command {
+        None
+        | Some(Command::Watch)
+        | Some(Command::Fix { .. })
+        | Some(Command::Fmt { .. })
+        | Some(Command::Explain { .. })
+        | Some(Command::Compile { .. })
+        | Some(Command::AstCompare { .. })
+        | Some(Command::Disasm { .. }) => true,
+        Some(Command::Lint { json, reporter, .. }) => {
+            !*json && *reporter == output::Reporter::Default
+        }
+        Some(Command::Rules { json }) => !*json,
+        Some(Command::Lsp) | Some(Command::Ci { .. }) | Some(Command::SelfUpdate { .. }) => false,
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cfg = config::Config::load(&root).unwrap_or_default();
+
+    if should_auto_update(&cli) {
+        self_update::maybe_auto_update(&cfg.update);
+    }
 
     match cli.command {
         Some(Command::Watch) => {

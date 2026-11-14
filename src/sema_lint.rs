@@ -41,6 +41,19 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
     let mut table = SymbolTable::new(cx.path);
     let mut local_sigs: HashMap<String, (usize, usize)> = HashMap::new();
     let mut global_dims: HashMap<String, usize> = HashMap::new();
+    let mut stateful_funcs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let declare_const_like = |table: &mut SymbolTable, name: &str, span: Span| {
+        if let Some(existing) = table.lookup(name)
+            && table.get(existing).kind == SymKind::Constant
+        {
+            return;
+        }
+        table.declare(
+            SymbolDecl::new(name.to_string(), SymKind::Constant, span)
+                .with_usage(Usage::DEFINED | Usage::CONST | Usage::READ),
+        );
+    };
 
     // Pass 1: declare every file-scope name first, so a function can refer to a
     // global/function declared below it (Pawn allows that).
@@ -55,23 +68,14 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
             Item::Const(c) => {
                 // Constants are intentionally READ-exempt: flag enums and
                 // compile-time tables are routinely "unused" by design.
-                table.declare(
-                    SymbolDecl::new(c.name.name.clone(), SymKind::Constant, c.name.span)
-                        .with_usage(Usage::DEFINED | Usage::CONST | Usage::READ),
-                );
+                declare_const_like(&mut table, &c.name.name, c.name.span);
             }
             Item::Enum(e) => {
                 if let Some(name) = &e.name {
-                    table.declare(
-                        SymbolDecl::new(name.name.clone(), SymKind::Constant, name.span)
-                            .with_usage(Usage::DEFINED | Usage::CONST | Usage::READ),
-                    );
+                    declare_const_like(&mut table, &name.name, name.span);
                 }
                 for m in &e.members {
-                    table.declare(
-                        SymbolDecl::new(m.name.name.clone(), SymKind::Constant, m.name.span)
-                            .with_usage(Usage::DEFINED | Usage::CONST | Usage::READ),
-                    );
+                    declare_const_like(&mut table, &m.name.name, m.name.span);
                 }
             }
             Item::Func(f) => {
@@ -94,10 +98,14 @@ pub fn run(cx: &mut Ctx, program: &zpc_ast::Program) {
                 if f.kind == FuncKind::Native {
                     usage |= Usage::NATIVE;
                 }
-                table.declare(
-                    SymbolDecl::new(name.name.clone(), SymKind::Function, name.span)
-                        .with_usage(usage),
-                );
+                // Pawn automaton state functions (`fn()<idle>`) declare one
+                // body per state with the same name; only declare once.
+                if f.states.is_none() || stateful_funcs.insert(name.name.clone()) {
+                    table.declare(
+                        SymbolDecl::new(name.name.clone(), SymKind::Function, name.span)
+                            .with_usage(usage),
+                    );
+                }
 
                 if crate::api::lookup(&name.name).is_none() {
                     let min_args = f
@@ -811,6 +819,24 @@ mod tests {
 
         let ok = lint("dupok", "forward my_fwd(id);\npublic my_fwd(id) { return id; }\n");
         assert!(!has(&ok, "duplicate_global"));
+
+        let ok_state = lint(
+            "dupstate",
+            "public SQL_Init()<sqlite> {}\npublic SQL_Init()<mysql> {}\n",
+        );
+        assert!(!has(&ok_state, "duplicate_global"));
+
+        let ok_enum = lint(
+            "dupenum",
+            "enum _:Shop { ItemName[32], Cost }\nenum _:Guns { ItemName[32], Ammo }\n",
+        );
+        assert!(!has(&ok_enum, "duplicate_global"));
+
+        let bad_enum_var = lint(
+            "dupenumvar",
+            "enum { ItemName }\nnew ItemName;\npublic f() { ItemName = 1; }\n",
+        );
+        assert!(has(&bad_enum_var, "duplicate_global"));
     }
 
     #[test]
