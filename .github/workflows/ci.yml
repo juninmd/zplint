@@ -10,6 +10,9 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: clippy
@@ -64,6 +67,10 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # audit-check publishes its result as a check run.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v5
       - uses: rustsec/audit-check@v2
