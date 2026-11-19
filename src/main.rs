@@ -187,7 +187,19 @@ fn should_auto_update(cli: &Cli) -> bool {
 fn main() {
     let cli = Cli::parse();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let cfg = config::Config::load(&root).unwrap_or_default();
+    let cfg = match config::Config::load(&root) {
+        Ok(cfg) => cfg,
+        // A broken config must not silently turn every rule setting back to defaults in CI.
+        // Long-lived editor/watch sessions keep running on defaults instead of dying.
+        Err(err) => {
+            eprintln!("zplint: invalid {}: {err}", config::CONFIG_FILE);
+            if matches!(cli.command, Some(Command::Lsp) | Some(Command::Watch)) {
+                config::Config::default()
+            } else {
+                std::process::exit(2);
+            }
+        }
+    };
 
     if should_auto_update(&cli) {
         self_update::maybe_auto_update(&cfg.update);

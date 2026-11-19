@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-static CONFIG_FILE: &str = "zplint.toml";
+pub static CONFIG_FILE: &str = "zplint.toml";
 
 #[derive(Deserialize, Clone)]
 pub struct Config {
