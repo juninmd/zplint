@@ -40,17 +40,19 @@ fn push_sma_files(root: &Path, base: &Path, exclude: &[String], files: &mut Vec<
 /// (default `HEAD`), plus untracked files. Used by `--changed`.
 pub fn changed_files(root: &Path, since: Option<&str>, exclude: &[String]) -> Vec<PathBuf> {
     let base = since.unwrap_or("HEAD");
-    let mut out = git_names(root, &["diff", "--name-only", "--diff-filter=ACMR", base]);
-    out.extend(git_names(root, &["ls-files", "--others", "--exclude-standard"]));
+    let mut out = git_names(root, &["diff", "--name-only", "--relative", "-z", "--diff-filter=ACMR", base]);
+    out.extend(git_names(root, &["ls-files", "-z", "--others", "--exclude-standard"]));
     filter_sma(root, out, exclude)
 }
 
 /// Files staged for the next commit. Used by `--staged`.
 pub fn staged_files(root: &Path, exclude: &[String]) -> Vec<PathBuf> {
-    let out = git_names(root, &["diff", "--cached", "--name-only", "--diff-filter=ACMR"]);
+    let out = git_names(root, &["diff", "--cached", "--name-only", "--relative", "-z", "--diff-filter=ACMR"]);
     filter_sma(root, out, exclude)
 }
 
+/// `args` must ask for cwd-relative (`--relative`, or `ls-files`) and NUL-separated (`-z`) names:
+/// `root` may be a subdirectory of the repository, and `-z` keeps non-ASCII names unquoted.
 fn git_names(root: &Path, args: &[&str]) -> Vec<PathBuf> {
     let Ok(out) = std::process::Command::new("git")
         .arg("-C")
@@ -64,8 +66,7 @@ fn git_names(root: &Path, args: &[&str]) -> Vec<PathBuf> {
         return Vec::new();
     }
     String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
+        .split('\0')
         .filter(|l| !l.is_empty())
         .map(|l| root.join(l))
         .collect()
@@ -117,5 +118,40 @@ mod tests {
 
         assert!(files.is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C").arg(dir)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn changed_and_staged_resolve_from_a_subdirectory() {
+        let repo = std::env::temp_dir().join(format!("zplint_changed_sub_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        let sub = repo.join("plugins");
+        std::fs::create_dir_all(&sub).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(sub.join("a.sma"), "public plugin_init() {}\n").unwrap();
+        std::fs::write(repo.join("outside.sma"), "public plugin_init() {}\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        std::fs::write(sub.join("a.sma"), "public plugin_init() { }\n").unwrap();
+        std::fs::write(repo.join("outside.sma"), "public plugin_init() { }\n").unwrap();
+
+        // `zplint lint --changed` run from plugins/: root is the cwd, not the repo top level.
+        let changed = changed_files(&sub, None, &[]);
+        assert_eq!(changed, vec![sub.join("a.sma")]);
+        assert!(changed.iter().all(|p| p.exists()));
+
+        git(&repo, &["add", "."]);
+        assert_eq!(staged_files(&sub, &[]), vec![sub.join("a.sma")]);
+        std::fs::remove_dir_all(repo).unwrap();
     }
 }
