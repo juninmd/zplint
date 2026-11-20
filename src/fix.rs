@@ -29,10 +29,20 @@ pub fn auto_fix(filepath: &Path, config: &Config, unsafe_fixes: bool, _use_color
     }
 
     if fixes > 0 {
-        let out = lines.join("\n");
-        std::fs::write(filepath, out).ok();
+        std::fs::write(filepath, rejoin(&raw, &lines)).ok();
     }
     fixes
+}
+
+/// Joins edited lines with the file's own line ending and keeps its final newline, so a fix on a
+/// CRLF plugin does not rewrite every line of it.
+fn rejoin(raw: &str, lines: &[String]) -> String {
+    let eol = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = lines.join(eol);
+    if raw.ends_with('\n') {
+        out.push_str(eol);
+    }
+    out
 }
 
 fn apply_fix(line: &str, issue: &crate::rules::LintIssue) -> Option<String> {
@@ -70,4 +80,31 @@ fn apply_fix(line: &str, issue: &crate::rules::LintIssue) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fix_keeps_crlf_and_the_final_newline() {
+        let dir = std::env::temp_dir().join(format!("zplint_fix_eol_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.sma");
+        let src = "#include <amxmodx>\r\n\r\npublic plugin_init()\r\n{\r\n\tnew name[32]\r\n\tget_user_name(1, name, 32)\r\n}\r\n";
+        std::fs::write(&file, src).unwrap();
+
+        assert_eq!(auto_fix(&file, &Config::default(), false, false), 1);
+
+        let fixed = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(fixed, src.replace("name, 32)", "name, charsmax(name))"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rejoin_keeps_lf_files_lf() {
+        let lines = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(rejoin("a\nb\n", &lines), "a\nb\n");
+        assert_eq!(rejoin("a\nb", &lines), "a\nb");
+    }
 }
