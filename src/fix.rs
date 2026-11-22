@@ -14,6 +14,7 @@ pub fn auto_fix(
         .iter()
         .filter(|i| i.fix.is_safe() || (unsafe_fixes && i.fix == crate::rules::FixSafety::Unsafe))
         .collect();
+
     if fixable.is_empty() { return Ok(0); }
 
     let (raw, utf8) = decode_source(std::fs::read(filepath)?);
@@ -34,8 +35,8 @@ pub fn auto_fix(
     if fixes > 0 {
         let fixed = rejoin(&raw, &lines);
         // A Windows-1252 plugin goes back byte for byte; re-encoding it as UTF-8 would garble its accents.
-        let bytes = if utf8 { None } else { fixed.chars().map(|c| u8::try_from(u32::from(c)).ok()).collect() };
-        std::fs::write(filepath, bytes.unwrap_or_else(|| fixed.into_bytes()))?;
+        let bytes = if utf8 { None } else { fixed.as_bytes().to_vec() };
+        std::fs::write(filepath, bytes)?;
     }
     Ok(fixes)
 }
