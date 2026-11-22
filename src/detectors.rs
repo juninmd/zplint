@@ -1066,10 +1066,13 @@ fn condition_ends_with_semicolon(after_paren: &str) -> bool {
     false
 }
 
+// Compiled once: this runs for every if/while line, and building the regex cost far more than matching.
+static RE_IF_WHILE_OPEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(if|while)\s*\(").unwrap());
+
 /// Single `=` (not ==/!=/<=/>=/compound) at paren depth 1 of an if/while condition.
 /// Depth >= 2 (the `if ((x = y))` idiom and call arguments) is not flagged.
 fn assignment_in_condition(line: &str) -> bool {
-    let Some(m) = Regex::new(r"\b(if|while)\s*\(").unwrap().find(line) else { return false; };
+    let Some(m) = RE_IF_WHILE_OPEN.find(line) else { return false; };
     let cond = &line[m.end()..];
     let mut depth = 1i32;
     let bytes: Vec<char> = cond.chars().collect();
