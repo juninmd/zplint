@@ -1,0 +1,1 @@
+{"verdict":"APPROVE","summary":"Mudança menor: @1.88.0 → @1.88 na job msrv do CI. Não há alteração de comportamento, credenciais expostas ou defeitos. O diff original está invertido em relação ao estado atual do repositório (já usa @1.88.0).","diagram":null,"findings":[]}
