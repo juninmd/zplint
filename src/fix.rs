@@ -2,18 +2,21 @@ use crate::config::Config;
 use crate::engine::lint_file;
 use std::path::Path;
 
-pub fn auto_fix(filepath: &Path, config: &Config, unsafe_fixes: bool, _use_color: bool) -> i32 {
+/// Errors when the fixed file cannot be read back or written, so the caller does not report it as fixed.
+pub fn auto_fix(
+    filepath: &Path,
+    config: &Config,
+    unsafe_fixes: bool,
+    _use_color: bool,
+) -> std::io::Result<i32> {
     let issues = lint_file(filepath, &config.rules);
     let fixable: Vec<_> = issues
         .iter()
         .filter(|i| i.fix.is_safe() || (unsafe_fixes && i.fix == crate::rules::FixSafety::Unsafe))
         .collect();
-    if fixable.is_empty() { return 0; }
+    if fixable.is_empty() { return Ok(0); }
 
-    let raw = match std::fs::read_to_string(filepath) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
+    let raw = std::fs::read_to_string(filepath)?;
     let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
     let mut fixes = 0i32;
 
@@ -29,9 +32,9 @@ pub fn auto_fix(filepath: &Path, config: &Config, unsafe_fixes: bool, _use_color
     }
 
     if fixes > 0 {
-        std::fs::write(filepath, rejoin(&raw, &lines)).ok();
+        std::fs::write(filepath, rejoin(&raw, &lines))?;
     }
-    fixes
+    Ok(fixes)
 }
 
 /// Joins edited lines with the file's own line ending and keeps its final newline, so a fix on a
@@ -94,10 +97,32 @@ mod tests {
         let src = "#include <amxmodx>\r\n\r\npublic plugin_init()\r\n{\r\n\tnew name[32]\r\n\tget_user_name(1, name, 32)\r\n}\r\n";
         std::fs::write(&file, src).unwrap();
 
-        assert_eq!(auto_fix(&file, &Config::default(), false, false), 1);
+        assert_eq!(auto_fix(&file, &Config::default(), false, false).unwrap(), 1);
 
         let fixed = std::fs::read_to_string(&file).unwrap();
         assert_eq!(fixed, src.replace("name, 32)", "name, charsmax(name))"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fix_reports_a_write_failure_instead_of_success() {
+        let dir = std::env::temp_dir().join(format!("zplint_fix_ro_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.sma");
+        let src = "public plugin_init()\n{\n\tnew name[32]\n\tget_user_name(1, name, 32)\n}\n";
+        std::fs::write(&file, src).unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms.clone()).unwrap();
+
+        // Root ignores file modes; the check only means something when the OS refuses the write.
+        if std::fs::OpenOptions::new().write(true).open(&file).is_err() {
+            assert!(auto_fix(&file, &Config::default(), false, false).is_err());
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), src);
+        }
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 
