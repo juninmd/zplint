@@ -220,7 +220,10 @@ fn main() {
             }
         }
         Some(Command::Fix { files, unsafe_fixes }) => {
-            run_fix(&root, &cfg, files, unsafe_fixes);
+            let code = run_fix(&root, &cfg, files, unsafe_fixes);
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Some(Command::Lint {
             files,
@@ -504,7 +507,7 @@ fn run_ast_compare(root: &std::path::Path, cfg: &config::Config, files: Vec<Path
     0
 }
 
-fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, unsafe_fixes: bool) {
+fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, unsafe_fixes: bool) -> i32 {
     let sma_files = if files.is_empty() {
         discover::discover_files(root, &cfg.paths, &cfg.exclude)
     } else {
@@ -513,22 +516,35 @@ fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, un
 
     if sma_files.is_empty() {
         eprintln!("No .sma files found");
-        return;
+        return 0;
     }
 
     let mut total = 0i32;
+    let mut failed = 0usize;
     for f in &sma_files {
-        let fixes = fix::auto_fix(f, cfg, unsafe_fixes, cfg.output.color);
-        if fixes > 0 {
-            total += fixes;
-            let rel = f.strip_prefix(root).unwrap_or(f);
-            eprintln!("  v {} fix(es) on {}", fixes, rel.display());
+        let rel = f.strip_prefix(root).unwrap_or(f);
+        match fix::auto_fix(f, cfg, unsafe_fixes, cfg.output.color) {
+            Ok(0) => {}
+            Ok(fixes) => {
+                total += fixes;
+                eprintln!("  v {} fix(es) on {}", fixes, rel.display());
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("  x could not fix {}: {}", rel.display(), e);
+            }
         }
     }
     if total > 0 {
         eprintln!("\n{} total fix(es) applied", total);
-    } else {
+    } else if failed == 0 {
         eprintln!("No fixes needed");
+    }
+    if failed > 0 {
+        eprintln!("{} file(s) could not be fixed", failed);
+        1
+    } else {
+        0
     }
 }
 
