@@ -64,14 +64,18 @@ static FWD_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     DANGEROUS_FORWARDS.iter().map(|(fwd, _)| Regex::new(&format!(r"\b{}\s*\(", fwd)).unwrap()).collect()
 });
 
+/// Old .sma files are often Windows-1252; byte -> codepoint keeps ASCII and line structure
+/// intact, which is all the detectors need. The flag is false for such a byte-decoded file.
+pub fn decode_source(bytes: Vec<u8>) -> (String, bool) {
+    match String::from_utf8(bytes) {
+        Ok(s) => (s, true),
+        Err(e) => (e.into_bytes().iter().map(|&b| b as char).collect(), false),
+    }
+}
+
 pub fn lint_file(filepath: &std::path::Path, config: &RulesConfig) -> Vec<LintIssue> {
     let raw = match std::fs::read(filepath) {
-        // Old .sma files are often Windows-1252; byte -> codepoint keeps ASCII
-        // and line structure intact, which is all the detectors need.
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
-        },
+        Ok(bytes) => decode_source(bytes).0,
         Err(_) => return vec![],
     };
     lint_source(filepath, &raw, config)
