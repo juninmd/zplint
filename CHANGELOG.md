@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-22
+
+### Bug Fixes
+
+- **fix:** report files that could not be written instead of counting them as fixed (#42)
+
 ## [0.6.3] - 2026-11-20
 
 ### Bug Fixes
