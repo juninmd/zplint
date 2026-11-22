@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::engine::lint_file;
+use crate::engine::{decode_source, lint_file};
 use std::path::Path;
 
 /// Errors when the fixed file cannot be read back or written, so the caller does not report it as fixed.
@@ -16,7 +16,7 @@ pub fn auto_fix(
         .collect();
     if fixable.is_empty() { return Ok(0); }
 
-    let raw = std::fs::read_to_string(filepath)?;
+    let (raw, utf8) = decode_source(std::fs::read(filepath)?);
     let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
     let mut fixes = 0i32;
 
@@ -32,7 +32,10 @@ pub fn auto_fix(
     }
 
     if fixes > 0 {
-        std::fs::write(filepath, rejoin(&raw, &lines))?;
+        let fixed = rejoin(&raw, &lines);
+        // A Windows-1252 plugin goes back byte for byte; re-encoding it as UTF-8 would garble its accents.
+        let bytes = if utf8 { None } else { fixed.chars().map(|c| u8::try_from(u32::from(c)).ok()).collect() };
+        std::fs::write(filepath, bytes.unwrap_or_else(|| fixed.into_bytes()))?;
     }
     Ok(fixes)
 }
@@ -101,6 +104,22 @@ mod tests {
 
         let fixed = std::fs::read_to_string(&file).unwrap();
         assert_eq!(fixed, src.replace("name, 32)", "name, charsmax(name))"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fix_keeps_a_windows_1252_plugin_in_its_encoding() {
+        let dir = std::env::temp_dir().join(format!("zplint_fix_1252_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.sma");
+        // 0xE9 is "é" in Windows-1252 and not valid UTF-8 on its own.
+        let src = b"// Fun\xe7\xe3o do caf\xe9\npublic plugin_init()\n{\n\tnew name[32]\n\tget_user_name(1, name, 32)\n}\n";
+        std::fs::write(&file, src).unwrap();
+
+        assert_eq!(auto_fix(&file, &Config::default(), false, false).unwrap(), 1);
+
+        let expected: &[u8] = b"// Fun\xe7\xe3o do caf\xe9\npublic plugin_init()\n{\n\tnew name[32]\n\tget_user_name(1, name, charsmax(name))\n}\n";
+        assert_eq!(std::fs::read(&file).unwrap(), expected);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
