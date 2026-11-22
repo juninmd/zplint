@@ -486,8 +486,7 @@ fn run_ast_compare(root: &std::path::Path, cfg: &config::Config, files: Vec<Path
     let mut parsed = 0usize;
     let mut divergences = 0usize;
     for f in &sma_files {
-        let src = std::fs::read_to_string(f).unwrap_or_default();
-        if ast_lint::parses_cleanly(f, &src) {
+        if file_parses_cleanly(f) {
             parsed += 1;
         }
         for d in ast_lint::compare(f, &cfg.rules) {
@@ -505,6 +504,18 @@ fn run_ast_compare(root: &std::path::Path, cfg: &config::Config, files: Vec<Path
         divergences
     );
     0
+}
+
+/// Reads the file the way `lint` does (Windows-1252 included). An unreadable file used to be
+/// parsed as "" and counted as clean, inflating the parity figure.
+fn file_parses_cleanly(f: &std::path::Path) -> bool {
+    match std::fs::read(f) {
+        Ok(bytes) => ast_lint::parses_cleanly(f, &engine::decode_source(bytes).0),
+        Err(e) => {
+            eprintln!("  x could not read {}: {}", f.display(), e);
+            false
+        }
+    }
 }
 
 fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, unsafe_fixes: bool) -> i32 {
@@ -551,6 +562,21 @@ fn run_fix(root: &std::path::Path, cfg: &config::Config, files: Vec<PathBuf>, un
 #[cfg(test)]
 mod explain_tests {
     use super::*;
+
+    #[test]
+    fn parity_does_not_count_unreadable_or_windows_1252_broken_files_as_clean() {
+        let dir = std::env::temp_dir().join(format!("zplint_parity_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken = dir.join("broken.sma");
+        // Windows-1252 accent (0xE9) plus a syntax error: read_to_string failed and "" parsed cleanly.
+        std::fs::write(&broken, b"// caf\xe9\npublic f( {\n").unwrap();
+        assert!(!file_parses_cleanly(&broken));
+        assert!(!file_parses_cleanly(&dir.join("missing.sma")));
+        let good = dir.join("good.sma");
+        std::fs::write(&good, b"// caf\xe9\npublic f()\n{\n}\n").unwrap();
+        assert!(file_parses_cleanly(&good));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn extracts_ids_exactly() {
