@@ -35,7 +35,7 @@ pub fn auto_fix(
     if fixes > 0 {
         let fixed = rejoin(&raw, &lines);
         // A Windows-1252 plugin goes back byte for byte; re-encoding it as UTF-8 would garble its accents.
-        let bytes = if utf8 { None } else { fixed.as_bytes().to_vec() };
+        let bytes = if utf8 { fixed.into_bytes() } else { fixed.chars().map(|c| c as u8).collect::<Vec<u8>>() };
         std::fs::write(filepath, bytes)?;
     }
     Ok(fixes)
