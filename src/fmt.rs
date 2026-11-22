@@ -275,6 +275,7 @@ pub fn run(root: &Path, cfg: &Config, files: Vec<PathBuf>, check: bool, write: b
     }
 
     let mut changed = 0usize;
+    let mut failed = 0usize;
     for path in &sma_files {
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
@@ -283,15 +284,24 @@ pub fn run(root: &Path, cfg: &Config, files: Vec<PathBuf>, check: bool, write: b
         if formatted == src {
             continue;
         }
-        changed += 1;
         if write {
-            std::fs::write(path, formatted).ok();
+            if let Err(e) = std::fs::write(path, formatted) {
+                failed += 1;
+                eprintln!("  x could not reformat {}: {}", path.display(), e);
+                continue;
+            }
+            changed += 1;
             eprintln!("  v reformatted {}", path.display());
         } else {
+            changed += 1;
             eprintln!("  x would reformat {}", path.display());
         }
     }
 
+    if failed > 0 {
+        eprintln!("\n{} file(s) could not be reformatted", failed);
+        return 1;
+    }
     if changed == 0 {
         eprintln!("No formatting changes");
     } else if write {
@@ -334,5 +344,27 @@ mod tests {
         let out = format_source(src);
         assert!(out.contains("   keep me"));
         assert!(out.contains("#if defined X\n"));
+    }
+
+    #[test]
+    fn write_failure_is_reported_and_fails_the_run() {
+        let dir = std::env::temp_dir().join(format!("zplint_fmt_ro_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.sma");
+        let src = "public f()\n{\nreturn 1\n}\n";
+        std::fs::write(&file, src).unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms.clone()).unwrap();
+
+        // Root ignores file modes; the check only means something when the OS refuses the write.
+        if std::fs::OpenOptions::new().write(true).open(&file).is_err() {
+            assert_eq!(run(&dir, &Config::default(), vec![file.clone()], false, true), 1);
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), src);
+        }
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
